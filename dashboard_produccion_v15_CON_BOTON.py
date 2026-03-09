@@ -1035,7 +1035,7 @@ display:flex;align-items:center;justify-content:center;">
   <span class="sec-num">04</span>
   <div>
     <div class="sec-title">Predicción: Proyección al Día {TARGET_DAY}</div>
-    <div class="sec-sub">Automática · cambia con el lote seleccionado</div>
+    <div class="sec-sub">Real vs Ideal vs Proyección · costo comparable con precio/kg del lote</div>
   </div>
 </div>""")
 
@@ -1077,10 +1077,16 @@ display:flex;align-items:center;justify-content:center;">
 
             edad_actual = int(hist_real_plot.iloc[-1]["Edad"])
             peso_actual = float(hist_real_plot.iloc[-1]["PesoFinal"])
-            aves_actual = float(hist_real_plot.iloc[-1]["AvesVivas"]) if "AvesVivas" in hist_real_plot.columns and pd.notna(hist_real_plot.iloc[-1]["AvesVivas"]) else np.nan
+            aves_actual = (
+                float(hist_real_plot.iloc[-1]["AvesVivas"])
+                if "AvesVivas" in hist_real_plot.columns and pd.notna(hist_real_plot.iloc[-1]["AvesVivas"])
+                else np.nan
+            )
 
-            # Si el lote ya pasó de 35, no lo cortamos visualmente
-            display_day_max = TARGET_DAY if edad_actual <= TARGET_DAY else edad_actual
+            # La visualización SIEMPRE corta en día 35
+            display_day_max = TARGET_DAY
+
+            # La predicción no puede ir hacia atrás; si el lote ya pasó de 35, igual mantenemos estabilidad
             target_pred_day = max(TARGET_DAY, edad_actual)
 
             # ── Precio/kg real del galpón por día ──────────────
@@ -1095,17 +1101,39 @@ display:flex;align-items:center;justify-content:center;">
             else:
                 hist_real_plot["PrecioKgRealDia"] = np.nan
 
+            # 1) costo diario / alimento diario
             if "CostoAlimentoDia" in hist_real_plot.columns and "_alim_dia" in hist_real_plot.columns:
                 hist_real_plot["PrecioKgRealDia"] = hist_real_plot["PrecioKgRealDia"].fillna(
                     hist_real_plot["CostoAlimentoDia"] / hist_real_plot["_alim_dia"].replace(0, np.nan)
                 )
 
-            hist_real_plot["PrecioKgRealDia"] = hist_real_plot["PrecioKgRealDia"].fillna(
-                hist_real_plot["CostoAcum"] / hist_real_plot["AlimAcumKg"].replace(0, np.nan)
-            )
+            # 2) costo acumulado / alimento acumulado
+            if "CostoAcum" in hist_real_plot.columns and "AlimAcumKg" in hist_real_plot.columns:
+                hist_real_plot["PrecioKgRealDia"] = hist_real_plot["PrecioKgRealDia"].fillna(
+                    hist_real_plot["CostoAcum"] / hist_real_plot["AlimAcumKg"].replace(0, np.nan)
+                )
 
             hist_real_plot["PrecioKgRealDia"] = hist_real_plot["PrecioKgRealDia"].ffill().bfill()
-            precio_kg_ref = float(hist_real_plot["PrecioKgRealDia"].dropna().iloc[-1]) if hist_real_plot["PrecioKgRealDia"].notna().any() else np.nan
+
+            serie_precios_validos = hist_real_plot["PrecioKgRealDia"].dropna()
+
+            precio_kg_ultimo = (
+                float(serie_precios_validos.iloc[-1])
+                if not serie_precios_validos.empty
+                else np.nan
+            )
+
+            precio_kg_promedio_ref = (
+                float(serie_precios_validos.tail(7).mean())
+                if not serie_precios_validos.empty
+                else np.nan
+            )
+
+            if pd.isna(precio_kg_promedio_ref):
+                precio_kg_promedio_ref = precio_kg_ultimo
+
+            if pd.isna(precio_kg_ultimo):
+                precio_kg_ultimo = precio_kg_promedio_ref
 
             # KgLive real si no viene calculado
             if "KgLive" not in hist_real_plot.columns or hist_real_plot["KgLive"].isna().all():
@@ -1113,9 +1141,6 @@ display:flex;align-items:center;justify-content:center;">
                     hist_real_plot["KgLive"] = hist_real_plot["AvesVivas"] * hist_real_plot["PesoFinal"]
                 else:
                     hist_real_plot["KgLive"] = np.nan
-
-            # FCR real columna
-            fcr_col_real = "conversio alimenticia" if "conversio alimenticia" in hist_real_plot.columns else "FCR_Cum"
 
             # ── Cache de predicción ─────────────────────────────
             if "pred_cache" not in st.session_state:
@@ -1164,10 +1189,10 @@ display:flex;align-items:center;justify-content:center;">
 
                     dias_rest = max(0, TARGET_DAY - edad_actual)
 
-                    # ── Curva ideal ───────────────────────────────
+                    # ── Curva ideal extendida hasta día 35 ───────
                     ideal_pred_plot = get_curva_ideal_promedio(
                         zona_pred, tipo_pred, quint_pred, IDEALES,
-                        edad_max=display_day_max
+                        edad_max=TARGET_DAY
                     )
 
                     ideal_ycol = None
@@ -1182,17 +1207,29 @@ display:flex;align-items:center;justify-content:center;">
 
                         if ideal_ycol is not None:
                             ideal_pred_plot[ideal_ycol] = pd.to_numeric(ideal_pred_plot[ideal_ycol], errors="coerce")
+
                             if "FCR_ideal" in ideal_pred_plot.columns:
                                 ideal_pred_plot["FCR_ideal"] = pd.to_numeric(ideal_pred_plot["FCR_ideal"], errors="coerce")
+                            else:
+                                ideal_pred_plot["FCR_ideal"] = np.nan
 
-                            ideal_pred_plot = (
-                                ideal_pred_plot[
-                                    ideal_pred_plot["Edad"].notna() &
-                                    ideal_pred_plot[ideal_ycol].notna()
-                                ]
-                                .sort_values("Edad")
-                                .copy()
+                            dias_full = pd.DataFrame({"Edad": np.arange(1, TARGET_DAY + 1, dtype=int)})
+                            ideal_pred_plot = dias_full.merge(ideal_pred_plot, on="Edad", how="left").sort_values("Edad")
+
+                            ideal_pred_plot[ideal_ycol] = (
+                                pd.to_numeric(ideal_pred_plot[ideal_ycol], errors="coerce")
+                                .interpolate(limit_direction="both")
+                                .ffill()
+                                .bfill()
                             )
+
+                            ideal_pred_plot["FCR_ideal"] = (
+                                pd.to_numeric(ideal_pred_plot["FCR_ideal"], errors="coerce")
+                                .ffill()
+                                .bfill()
+                            )
+
+                            ideal_pred_plot = ideal_pred_plot[ideal_pred_plot["Edad"] <= TARGET_DAY].copy()
 
                     # ── Ajuste SHIFT/ANCLA de la curva proyectada ─
                     peso_objetivo = np.nan
@@ -1231,10 +1268,7 @@ display:flex;align-items:center;justify-content:center;">
                             df_curve_plot.loc[m, ycol_pred] = np.maximum(df_curve_plot.loc[m, ycol_pred].values, float(peso_actual))
                             df_curve_plot.loc[m, ycol_pred] = np.maximum.accumulate(df_curve_plot.loc[m, ycol_pred].values)
 
-                            df_curve_plot = df_curve_plot[
-                                (df_curve_plot["Dia"] >= edad_actual) &
-                                (df_curve_plot["Dia"] <= display_day_max)
-                            ].copy()
+                            df_curve_plot = df_curve_plot[df_curve_plot["Dia"] <= TARGET_DAY].copy()
 
                     # ── REAL histórico con costo ideal comparable ─
                     hist_real_hover = hist_real_plot.copy()
@@ -1258,11 +1292,23 @@ display:flex;align-items:center;justify-content:center;">
                     hist_real_hover["CostoIdealAcum_comp"] = hist_real_hover["CostoIdealDia_comp"].fillna(0).cumsum()
                     hist_real_hover["GapCosto_comp"] = hist_real_hover["CostoAcum"] - hist_real_hover["CostoIdealAcum_comp"]
 
-                    hist_real_hover = hist_real_hover[hist_real_hover["Edad"] <= display_day_max].copy()
+                    hist_real_hover = hist_real_hover[hist_real_hover["Edad"] <= TARGET_DAY].copy()
 
-                    costo_real_hoy = float(hist_real_hover.iloc[-1]["CostoAcum"]) if not hist_real_hover.empty and pd.notna(hist_real_hover.iloc[-1]["CostoAcum"]) else np.nan
-                    costo_ideal_hoy = float(hist_real_hover.iloc[-1]["CostoIdealAcum_comp"]) if not hist_real_hover.empty and pd.notna(hist_real_hover.iloc[-1]["CostoIdealAcum_comp"]) else np.nan
-                    alim_ideal_hoy = float(hist_real_hover.iloc[-1]["AlimIdealAcum_comp"]) if not hist_real_hover.empty and pd.notna(hist_real_hover.iloc[-1]["AlimIdealAcum_comp"]) else np.nan
+                    costo_real_hoy = (
+                        float(hist_real_hover.iloc[-1]["CostoAcum"])
+                        if not hist_real_hover.empty and pd.notna(hist_real_hover.iloc[-1]["CostoAcum"])
+                        else np.nan
+                    )
+                    costo_ideal_hoy = (
+                        float(hist_real_hover.iloc[-1]["CostoIdealAcum_comp"])
+                        if not hist_real_hover.empty and pd.notna(hist_real_hover.iloc[-1]["CostoIdealAcum_comp"])
+                        else np.nan
+                    )
+                    alim_ideal_hoy = (
+                        float(hist_real_hover.iloc[-1]["AlimIdealAcum_comp"])
+                        if not hist_real_hover.empty and pd.notna(hist_real_hover.iloc[-1]["AlimIdealAcum_comp"])
+                        else np.nan
+                    )
 
                     factor_desvio = (
                         costo_real_hoy / costo_ideal_hoy
@@ -1270,7 +1316,7 @@ display:flex;align-items:center;justify-content:center;">
                         else 1.0
                     )
 
-                    # ── IDEAL line con costo comparable usando precio real del lote ─
+                    # ── IDEAL line con costo comparable usando precio real/avg del lote ─
                     ideal_line_df = pd.DataFrame()
                     if ideal_pred_plot is not None and not ideal_pred_plot.empty and ideal_ycol is not None:
                         ideal_line_df = ideal_pred_plot.copy()
@@ -1281,7 +1327,12 @@ display:flex;align-items:center;justify-content:center;">
                             on="Edad", how="left"
                         ).sort_values("Edad")
 
-                        ideal_line_df["PrecioKgRealDia"] = ideal_line_df["PrecioKgRealDia"].ffill().bfill().fillna(precio_kg_ref)
+                        ideal_line_df["PrecioKgRealDia"] = (
+                            ideal_line_df["PrecioKgRealDia"]
+                            .ffill()
+                            .bfill()
+                            .fillna(precio_kg_promedio_ref)
+                        )
                         ideal_line_df["AvesVivas"] = ideal_line_df["AvesVivas"].ffill().bfill().fillna(aves_actual)
 
                         ideal_line_df["KgLiveIdeal"] = ideal_line_df["AvesVivas"] * ideal_line_df["PesoIdeal"]
@@ -1294,9 +1345,9 @@ display:flex;align-items:center;justify-content:center;">
                         ideal_line_df["AlimIdealDia_line"] = ideal_line_df["AlimIdealDia_line"].clip(lower=0)
                         ideal_line_df["CostoIdealDia_line"] = ideal_line_df["AlimIdealDia_line"] * ideal_line_df["PrecioKgRealDia"]
                         ideal_line_df["CostoIdealAcum_line"] = ideal_line_df["CostoIdealDia_line"].fillna(0).cumsum()
-                        ideal_line_df = ideal_line_df[ideal_line_df["Edad"] <= display_day_max].copy()
+                        ideal_line_df = ideal_line_df[ideal_line_df["Edad"] <= TARGET_DAY].copy()
 
-                    # ── PROYECCIÓN con costo comparable ────────────
+                    # ── PROYECCIÓN con costo comparable hasta día 35 ─
                     proj_cost_df = pd.DataFrame()
                     if not df_curve_plot.empty and ycol_pred is not None:
                         proj_cost_df = df_curve_plot.copy()
@@ -1309,18 +1360,36 @@ display:flex;align-items:center;justify-content:center;">
                         else:
                             proj_cost_df["FCR_ideal"] = np.nan
 
+                        proj_cost_df["FCR_ideal"] = (
+                            pd.to_numeric(proj_cost_df["FCR_ideal"], errors="coerce")
+                            .ffill()
+                            .bfill()
+                        )
+
                         proj_cost_df["AvesRef"] = aves_actual
-                        proj_cost_df["PrecioKgRef"] = precio_kg_ref
+                        proj_cost_df["PrecioKgRef"] = precio_kg_promedio_ref
                         proj_cost_df["KgLivePred"] = proj_cost_df["AvesRef"] * proj_cost_df[ycol_pred]
                         proj_cost_df["AlimIdealAcum_pred"] = proj_cost_df["FCR_ideal"] * proj_cost_df["KgLivePred"]
 
-                        alim_base = alim_ideal_hoy if pd.notna(alim_ideal_hoy) else 0
-                        costo_base = costo_ideal_hoy if pd.notna(costo_ideal_hoy) else 0
+                        if pd.notna(alim_ideal_hoy):
+                            proj_cost_df["DeltaAlimIdeal_pred"] = (proj_cost_df["AlimIdealAcum_pred"] - alim_ideal_hoy).clip(lower=0)
+                        else:
+                            proj_cost_df["DeltaAlimIdeal_pred"] = np.nan
 
-                        proj_cost_df["DeltaAlimIdeal_pred"] = (proj_cost_df["AlimIdealAcum_pred"] - alim_base).clip(lower=0)
-                        proj_cost_df["CostoIdealAcum_pred"] = costo_base + (proj_cost_df["DeltaAlimIdeal_pred"] * proj_cost_df["PrecioKgRef"])
+                        if pd.notna(costo_ideal_hoy):
+                            proj_cost_df["CostoIdealAcum_pred"] = costo_ideal_hoy + (
+                                proj_cost_df["DeltaAlimIdeal_pred"] * proj_cost_df["PrecioKgRef"]
+                            )
+                        else:
+                            proj_cost_df["CostoIdealAcum_pred"] = proj_cost_df["AlimIdealAcum_pred"] * proj_cost_df["PrecioKgRef"]
+
                         proj_cost_df["CostoAcum_estimado"] = proj_cost_df["CostoIdealAcum_pred"] * factor_desvio
                         proj_cost_df["GapCosto_estimado"] = proj_cost_df["CostoAcum_estimado"] - proj_cost_df["CostoIdealAcum_pred"]
+
+                        proj_cost_df = proj_cost_df[
+                            (proj_cost_df["Dia"] >= edad_actual) &
+                            (proj_cost_df["Dia"] <= TARGET_DAY)
+                        ].copy()
 
                         fila_obj = proj_cost_df[proj_cost_df["Dia"] == TARGET_DAY]
                         if fila_obj.empty and not proj_cost_df.empty:
@@ -1331,9 +1400,18 @@ display:flex;align-items:center;justify-content:center;">
                             costo_estimado_obj = float(fila_obj.iloc[0]["CostoAcum_estimado"]) if pd.notna(fila_obj.iloc[0]["CostoAcum_estimado"]) else np.nan
                             gap_estimado_obj = float(fila_obj.iloc[0]["GapCosto_estimado"]) if pd.notna(fila_obj.iloc[0]["GapCosto_estimado"]) else np.nan
 
-                    # Si no hay proyección futura usable
+                    # Fallback si el lote ya pasó de 35 o no hay proyección útil
                     if pd.isna(peso_objetivo):
-                        peso_objetivo = peso_actual
+                        fila_real_obj = hist_real_hover[hist_real_hover["Edad"] == TARGET_DAY]
+                        if fila_real_obj.empty and not hist_real_hover.empty:
+                            fila_real_obj = hist_real_hover.tail(1)
+
+                        if not fila_real_obj.empty:
+                            peso_objetivo = float(fila_real_obj.iloc[0]["PesoFinal"]) if pd.notna(fila_real_obj.iloc[0]["PesoFinal"]) else peso_actual
+                            costo_estimado_obj = float(fila_real_obj.iloc[0]["CostoAcum"]) if pd.notna(fila_real_obj.iloc[0]["CostoAcum"]) else np.nan
+                            gap_estimado_obj = float(fila_real_obj.iloc[0]["GapCosto_comp"]) if pd.notna(fila_real_obj.iloc[0]["GapCosto_comp"]) else np.nan
+                        else:
+                            peso_objetivo = peso_actual
 
                     # ── KPIs superiores ────────────────────────────
                     c1, c2, c3, c4 = st.columns(4)
@@ -1432,8 +1510,8 @@ display:flex;align-items:center;justify-content:center;">
                             ),
                         ))
 
-                    # 4) Punto objetivo D35
-                    if not proj_cost_df.empty:
+                    # 4) Punto objetivo
+                    if not proj_cost_df.empty and ycol_pred is not None:
                         fila_d = proj_cost_df[proj_cost_df["Dia"] == TARGET_DAY]
                         if not fila_d.empty:
                             fig_p.add_trace(go.Scatter(
@@ -1445,15 +1523,16 @@ display:flex;align-items:center;justify-content:center;">
                                 hovertemplate=f"Día {TARGET_DAY}<br>%{{y:.3f}} kg<extra></extra>",
                             ))
 
-                    # 5) Línea vertical hoy
-                    fig_p.add_vline(
-                        x=edad_actual,
-                        line_dash="dot",
-                        line_color=AMBER,
-                        annotation_text=f"Hoy: día {edad_actual}",
-                        annotation_font=dict(size=9, color=CHART_TEXT),
-                        annotation_position="top right",
-                    )
+                    # 5) Línea vertical hoy (solo si cabe en la vista)
+                    if edad_actual <= TARGET_DAY:
+                        fig_p.add_vline(
+                            x=edad_actual,
+                            line_dash="dot",
+                            line_color=AMBER,
+                            annotation_text=f"Hoy: día {edad_actual}",
+                            annotation_font=dict(size=9, color=CHART_TEXT),
+                            annotation_position="top right",
+                        )
 
                     fig_p.update_layout(
                         template="plotly_white",
@@ -1476,7 +1555,7 @@ display:flex;align-items:center;justify-content:center;">
                             tickfont=dict(color=CHART_TEXT),
                             title_font=dict(color=CHART_TEXT),
                             dtick=7,
-                            range=[0, display_day_max]
+                            range=[0, TARGET_DAY]
                         ),
                         yaxis=dict(
                             title="Peso (kg)",
@@ -1517,6 +1596,20 @@ display:flex;align-items:center;justify-content:center;">
                                 ycol_pred: "PesoProyectado"
                             })
 
+                            tabla_pred_show["CostoIdealFmt"] = tabla_pred_show["CostoIdealAcum_pred"].apply(
+                                lambda x: fmt_manager(x, prefix="$")
+                            )
+                            tabla_pred_show["CostoEstimadoFmt"] = tabla_pred_show["CostoAcum_estimado"].apply(
+                                lambda x: fmt_manager(x, prefix="$")
+                            )
+                            tabla_pred_show["GapEstimadoFmt"] = tabla_pred_show["GapCosto_estimado"].apply(
+                                lambda x: fmt_manager(x, prefix="$")
+                            )
+
+                            tabla_pred_show = tabla_pred_show[[
+                                "Dia", "PesoProyectado", "CostoIdealFmt", "CostoEstimadoFmt", "GapEstimadoFmt"
+                            ]]
+
                         if not tabla_pred_show.empty:
                             st.dataframe(
                                 tabla_pred_show,
@@ -1525,9 +1618,9 @@ display:flex;align-items:center;justify-content:center;">
                                 column_config={
                                     "Dia": st.column_config.NumberColumn("Día", format="%d"),
                                     "PesoProyectado": st.column_config.NumberColumn("Peso proyectado (kg)", format="%.3f"),
-                                    "CostoIdealAcum_pred": st.column_config.NumberColumn("Costo ideal", format="$%,.0f"),
-                                    "CostoAcum_estimado": st.column_config.NumberColumn("Costo estimado", format="$%,.0f"),
-                                    "GapCosto_estimado": st.column_config.NumberColumn("Gap estimado", format="$%,.0f"),
+                                    "CostoIdealFmt": st.column_config.TextColumn("Costo ideal"),
+                                    "CostoEstimadoFmt": st.column_config.TextColumn("Costo estimado"),
+                                    "GapEstimadoFmt": st.column_config.TextColumn("Gap estimado"),
                                 }
                             )
                         else:
