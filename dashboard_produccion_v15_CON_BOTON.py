@@ -148,9 +148,7 @@ with fc3:
     sel_quint = st.multiselect("🧩 Quintil", ["Q1", "Q2", "Q3", "Q4", "Q5"], default=["Q2", "Q3", "Q4", "Q5"])
 with fc4:
     sel_estado = st.multiselect("🔄 Estado", ["ABIERTO", "CERRADO"], default=["ABIERTO"])
-with fc5:
-    st.button("🧠 Herramienta predictiva", use_container_width=True, on_click=go_predictiva)
-md("</div>")
+
 
 # ── Snapshot filtrado por filtros globales ───────────────────
 SF = SNAP.copy()
@@ -1676,57 +1674,6 @@ display:flex;align-items:center;justify-content:center;">
 
                     st.plotly_chart(fig_p, width="stretch", key=f"chart_pred_{lote_sel}")
 
-                    # ── Resumen ejecutivo ─────────────────────────
-                    m1, m2, m3, m4 = st.columns(4)
-                    with m1:
-                        st.metric("Edad actual", f"{edad_actual} días")
-                    with m2:
-                        st.metric("Peso actual", f"{peso_actual:.3f} kg")
-                    with m3:
-                        st.metric(f"Peso proy. D{TARGET_DAY}", f"{peso_objetivo:.3f} kg")
-                    with m4:
-                        st.metric(f"Costo est. D{TARGET_DAY}", fmt_manager(costo_estimado_obj, prefix="$"))
-
-                    with st.expander("📊 Ver tabla detallada de predicción"):
-                        tabla_pred_show = pd.DataFrame()
-
-                        if not proj_cost_df.empty and ycol_pred is not None:
-                            tabla_pred_show = proj_cost_df[[
-                                "Dia", ycol_pred, "CostoIdealAcum_pred", "CostoAcum_estimado", "GapCosto_estimado"
-                            ]].copy()
-                            tabla_pred_show = tabla_pred_show.rename(columns={
-                                ycol_pred: "PesoProyectado"
-                            })
-
-                            tabla_pred_show["CostoIdealFmt"] = tabla_pred_show["CostoIdealAcum_pred"].apply(
-                                lambda x: fmt_manager(x, prefix="$")
-                            )
-                            tabla_pred_show["CostoEstimadoFmt"] = tabla_pred_show["CostoAcum_estimado"].apply(
-                                lambda x: fmt_manager(x, prefix="$")
-                            )
-                            tabla_pred_show["GapEstimadoFmt"] = tabla_pred_show["GapCosto_estimado"].apply(
-                                lambda x: fmt_signed_short_r(x, prefix="$")
-                            )
-
-                            tabla_pred_show = tabla_pred_show[[
-                                "Dia", "PesoProyectado", "CostoIdealFmt", "CostoEstimadoFmt", "GapEstimadoFmt"
-                            ]]
-
-                        if not tabla_pred_show.empty:
-                            st.dataframe(
-                                tabla_pred_show,
-                                width="stretch",
-                                hide_index=True,
-                                column_config={
-                                    "Dia": st.column_config.NumberColumn("Día", format="%d"),
-                                    "PesoProyectado": st.column_config.NumberColumn("Peso proyectado (kg)", format="%.3f"),
-                                    "CostoIdealFmt": st.column_config.TextColumn("Costo ideal"),
-                                    "CostoEstimadoFmt": st.column_config.TextColumn("Costo estimado"),
-                                    "GapEstimadoFmt": st.column_config.TextColumn("Gap estimado"),
-                                }
-                            )
-                        else:
-                            st.info("No hay tabla de predicción disponible para este lote.")
 
 # ──────────────────────────────────────────────────────────────
 # FOOTER
