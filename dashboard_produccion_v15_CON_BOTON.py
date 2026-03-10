@@ -145,7 +145,7 @@ with fc1:
 with fc2:
     sel_tipo = st.multiselect("🏠 Tipo", ["PROPIA", "PAC"], default=["PROPIA", "PAC"])
 with fc3:
-    sel_quint = st.multiselect("🧩 Quintil", ["Q1", "Q2", "Q3", "Q4", "Q5"], default=["Q2", "Q3", "Q4", "Q5"])
+    sel_quint = st.multiselect("🧩 Quintil", ["Q1", "Q2", "Q3", "Q4", "Q5"], default=["Q1", "Q2", "Q3", "Q4", "Q5"])
 with fc4:
     sel_estado = st.multiselect("🔄 Estado", ["ABIERTO", "CERRADO"], default=["ABIERTO"])
 
