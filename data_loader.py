@@ -1,14 +1,37 @@
 # ──────────────────────────────────────────────────────────────
-# data_loader.py · PRONACA Dashboard v15
+# data_loader.py · PRONACA Dashboard v16
 # Adaptado a:
 #   produccion_mes_actual_simulada_abiertos.xlsx
-#   LOTES_IDEALES_QUINTILES_COMPLETO.xlsx  (Sheet1)
+#   LOTES_IDEALES_QUINTILES_COMPLETO.xlsx
+#
+# LÓGICA CENTRALIZADA DEL IDEAL COMPARABLE:
+#   1) Del benchmark ideal usamos:
+#        - Edad
+#        - Peso ideal
+#        - FCR ideal
+#
+#   2) Recalculamos el alimento acumulado ideal del galpón real:
+#        AlimIdealAcum_comp = PesoIdeal * FCR_ideal * AvesVivas_reales
+#
+#   3) Calculamos el alimento ideal diario:
+#        AlimIdealDia_comp = diff(AlimIdealAcum_comp)
+#
+#   4) Costeamos el ideal con precios REALES diarios:
+#        CostoIdealDia_comp = AlimIdealDia_comp * PrecioKgRealDia
+#
+#   5) Acumulamos:
+#        CostoIdealComp = cumsum(CostoIdealDia_comp)
+#
+#   6) Si el lote tiene días con alimento real 0 (ej. cierre),
+#      ese día NO genera costo ideal:
+#        _alim_dia == 0  ->  AlimIdealDia_comp = 0 y CostoIdealDia_comp = 0
 # ──────────────────────────────────────────────────────────────
+
 import numpy as np
 import pandas as pd
 import streamlit as st
 
-from config  import EDAD_MIN_ANALISIS
+from config import EDAD_MIN_ANALISIS
 from helpers import get_etapa, parse_num_series, pick_first_col
 
 
@@ -18,6 +41,38 @@ _TIPO_MAP = {
     "GRANJAPROPIA": "PROPIA", "PROPIA": "PROPIA",
     "PCA": "PAC",             "PAC":    "PAC",
 }
+
+
+# ──────────────────────────────────────────────────────────────
+# HELPERS INTERNOS
+# ──────────────────────────────────────────────────────────────
+def _safe_num(s):
+    return pd.to_numeric(s, errors="coerce")
+
+
+def _ensure_columns(df: pd.DataFrame, cols: list[str], fill_value=np.nan) -> pd.DataFrame:
+    out = df.copy()
+    for c in cols:
+        if c not in out.columns:
+            out[c] = fill_value
+    return out
+
+
+def _empty_comp_columns(hist: pd.DataFrame) -> pd.DataFrame:
+    out = hist.copy()
+    for c in [
+        "PesoIdeal_comp",
+        "FCR_ideal",
+        "KgLiveIdeal_comp",
+        "AlimIdealAcum_comp",
+        "AlimIdealDia_comp",
+        "CostoIdealDia_comp",
+        "CostoIdealComp",
+        "GapCostoComp",
+    ]:
+        if c not in out.columns:
+            out[c] = np.nan
+    return out
 
 
 # ──────────────────────────────────────────────────────────────
@@ -38,18 +93,15 @@ def load_and_prepare(path: str) -> pd.DataFrame:
     col_aves     = pick_first_col(df, ["Aves_vivas", "AvesVivas", "Aves Vivas", "Aves_netas"])
     col_granja   = pick_first_col(df, ["Granja", "GranjaID"])
     col_galpon   = pick_first_col(df, ["Galpon", "galpon"])
+    col_nombre_g = pick_first_col(df, ["NombreGranja", "Nombre Granja"])
     col_tipo_a   = pick_first_col(df, ["TipoAlimento", "tipo_alimento"])
-    col_cost     = pick_first_col(df, ["costo_alimento_acumulado", "CostoAlimentoAcum",
-                                       "CostoAlimentoAcumulado"])
+    col_cost     = pick_first_col(df, ["costo_alimento_acumulado", "CostoAlimentoAcum", "CostoAlimentoAcumulado"])
     col_cost_dia = pick_first_col(df, ["costo_alimento_dia", "CostoAlimentoDia"])
-    col_pricekg  = pick_first_col(df, ["precio_kg", "PrecioKg", "Precio_Kg", "precio kg"])
-    col_alimkg   = pick_first_col(df, ["Alimento_Acumulado", "Alimento_acumulado_kg",
-                                       "Alimento acum", "AlimAcumKg"])
-    col_alim_dia = pick_first_col(df, ["alimento_dia_kg", "AlimentoConsumido",
-                                       "Alimento Consumido"])
+    col_pricekg  = pick_first_col(df, ["precio_kg", "PrecioKg", "Precio_Kg", "precio kg", "Precio kg"])
+    col_alimkg   = pick_first_col(df, ["Alimento_Acumulado", "Alimento_acumulado_kg", "Alimento acum", "AlimAcumKg"])
+    col_alim_dia = pick_first_col(df, ["alimento_dia_kg", "AlimentoConsumido", "Alimento Consumido"])
     col_zona     = pick_first_col(df, ["Zona", "zona"])
-    col_tipo     = pick_first_col(df, ["TipoGranjero", "TipoGranja", "Tipo_Granja",
-                                       "Tipo de granja", "X30=Granja Propia"])
+    col_tipo     = pick_first_col(df, ["TipoGranjero", "TipoGranja", "Tipo_Granja", "Tipo de granja", "X30=Granja Propia"])
     col_quint    = pick_first_col(df, ["Quintil", "quintil", "Quintil_Area_Crianza"])
     col_estado   = pick_first_col(df, ["Cerrado", "EstadoLote", "Estado_Lote"])
     col_cierre   = pick_first_col(df, ["Cierre de campaña", "CierreCampaña", "FechaCierre"])
@@ -58,18 +110,26 @@ def load_and_prepare(path: str) -> pd.DataFrame:
 
     # ── Renombres base ────────────────────────────────────────
     rename_map = {col_lote: "LoteCompleto", col_edad: "Edad", col_peso: "PesoFinal"}
-    if col_aves:   rename_map[col_aves]   = "AvesVivas"
-    if col_galpon: rename_map[col_galpon] = "Galpon"
-    if col_tipo_a: rename_map[col_tipo_a] = "TipoAlimento"
+    if col_aves:
+        rename_map[col_aves] = "AvesVivas"
+    if col_galpon:
+        rename_map[col_galpon] = "Galpon"
+    if col_tipo_a:
+        rename_map[col_tipo_a] = "TipoAlimento"
+    if col_pricekg:
+        rename_map[col_pricekg] = "PrecioKg"
+    if col_nombre_g:
+        rename_map[col_nombre_g] = "NombreGranja"
+
     df = df.rename(columns=rename_map)
 
     # ── Estado del lote (Cerrado=0→ABIERTO, Cerrado=1→CERRADO) ──
     if col_estado:
         raw = df[col_estado]
-        if pd.api.types.is_numeric_dtype(raw) or \
-           raw.astype(str).str.match(r"^[01]$").fillna(False).any():
+        raw_num = parse_num_series(raw)
+        if raw_num.notna().any():
             df["EstadoLote"] = np.where(
-                parse_num_series(raw).fillna(0).astype(int) == 1, "CERRADO", "ABIERTO"
+                raw_num.fillna(0).astype(int) == 1, "CERRADO", "ABIERTO"
             )
         else:
             df["EstadoLote"] = raw.astype(str).str.upper().str.strip()
@@ -94,6 +154,9 @@ def load_and_prepare(path: str) -> pd.DataFrame:
         else df["LoteCompleto"].astype(str).str[:7]
     )
 
+    if "NombreGranja" not in df.columns:
+        df["NombreGranja"] = df["GranjaID"]
+
     # ── Tipo granja → PROPIA / PAC ────────────────────────────
     if col_tipo:
         t = df[col_tipo].astype(str).str.upper().str.strip().str.replace(" ", "", regex=False)
@@ -112,11 +175,25 @@ def load_and_prepare(path: str) -> pd.DataFrame:
         {"Q1": 1, "Q2": 2, "Q3": 3, "Q4": 4, "Q5": 5}
     ).astype(float)
 
+    # ── Tipos numéricos principales ───────────────────────────
+    df["Edad"] = parse_num_series(df["Edad"])
+    df["PesoFinal"] = parse_num_series(df["PesoFinal"])
+
+    if "AvesVivas" not in df.columns:
+        df["AvesVivas"] = np.nan
+    else:
+        df["AvesVivas"] = parse_num_series(df["AvesVivas"])
+
+    if "Galpon" not in df.columns:
+        df["Galpon"] = np.nan
+    else:
+        df["Galpon"] = parse_num_series(df["Galpon"])
+
     # ── Etapa por edad del registro ───────────────────────────
     df["Etapa"] = df.apply(
-    lambda r: get_etapa(r["Edad"], r.get("EstadoLote")),
-    axis=1
-    )   
+        lambda r: get_etapa(r["Edad"], r.get("EstadoLote")),
+        axis=1
+    )
 
     # ── Alimento acumulado ────────────────────────────────────
     if col_alimkg:
@@ -124,17 +201,15 @@ def load_and_prepare(path: str) -> pd.DataFrame:
     else:
         df["AlimAcumKg"] = np.nan
 
-    # Alimento diario (para debug/KPIs)
+    # Alimento diario
     if col_alim_dia:
         df["_alim_dia"] = parse_num_series(df[col_alim_dia]).fillna(0)
-        # Si el acumulado es todo NaN, reconstruirlo desde diario
         if df["AlimAcumKg"].isna().all():
             df = df.sort_values(["LoteCompleto", "Edad"]).copy()
             df["AlimAcumKg"] = df.groupby("LoteCompleto")["_alim_dia"].cumsum()
     else:
         df["_alim_dia"] = np.nan
 
-    # ── Costos ────────────────────────────────────────────────
     # ── Costos ────────────────────────────────────────────────
     df["CostoAcum"] = parse_num_series(df[col_cost]) if col_cost else np.nan
 
@@ -143,9 +218,8 @@ def load_and_prepare(path: str) -> pd.DataFrame:
     else:
         df["CostoAlimentoDia"] = np.nan
 
-    # Precio real por kg de alimento
-    if col_pricekg:
-        df["PrecioKg"] = parse_num_series(df[col_pricekg])
+    if "PrecioKg" in df.columns:
+        df["PrecioKg"] = parse_num_series(df["PrecioKg"])
     else:
         df["PrecioKg"] = np.nan
 
@@ -162,13 +236,16 @@ def load_and_prepare(path: str) -> pd.DataFrame:
     peso_ok = df["PesoFinal"].notna() & (df["PesoFinal"] > 0)
 
     def _corte_por_lote(g: pd.DataFrame) -> int:
-        estado       = str(g["EstadoLote"].iloc[0]).upper()
+        estado = str(g["EstadoLote"].iloc[0]).upper()
         tiene_cierre = bool(cierre_flag.loc[g.index].any()) or (estado == "CERRADO")
         gg = g[peso_ok.loc[g.index]].copy()
+
         if gg.empty:
             return int(g["Edad"].max()) if g["Edad"].notna().any() else 0
+
         if tiene_cierre:
             return int(gg["Edad"].max())
+
         gg7 = gg[gg["Edad"].astype(int) % 7 == 0]
         return int(gg7["Edad"].max()) if not gg7.empty else int(gg["Edad"].max())
 
@@ -181,33 +258,49 @@ def load_and_prepare(path: str) -> pd.DataFrame:
     df = df[df["Edad"] <= df["EdadCorte"]].copy()
 
     # ── Métricas derivadas ────────────────────────────────────
-    # ── Métricas derivadas ────────────────────────────────────
-    df["KgLive"]      = (df["AvesVivas"] * df["PesoFinal"]).astype(float)
-    df["CostoKg_Cum"] = df["CostoAcum"]  / df["KgLive"].replace(0, np.nan)
-    df["FCR_Cum"]     = df["AlimAcumKg"] / df["KgLive"].replace(0, np.nan)
+    df["KgLive"] = (df["AvesVivas"] * df["PesoFinal"]).astype(float)
+    df["CostoKg_Cum"] = df["CostoAcum"] / df["KgLive"].replace(0, np.nan)
+    df["FCR_Cum"] = df["AlimAcumKg"] / df["KgLive"].replace(0, np.nan)
 
-    # Si no vino precio_kg, estimarlo desde costo acumulado / alimento acumulado
-    if "PrecioKg" not in df.columns:
-        df["PrecioKg"] = np.nan
-
+    # Si no vino PrecioKg, estimarlo desde costo acumulado / alimento acumulado
     df["PrecioKg"] = df["PrecioKg"].fillna(
         df["CostoAcum"] / df["AlimAcumKg"].replace(0, np.nan)
     )
 
+    # PrecioKg real diario comparable
+    df["PrecioKgRealDia"] = df["PrecioKg"].copy()
+
+    df["PrecioKgRealDia"] = df["PrecioKgRealDia"].fillna(
+        df["CostoAlimentoDia"] / df["_alim_dia"].replace(0, np.nan)
+    )
+
+    df["PrecioKgRealDia"] = df["PrecioKgRealDia"].fillna(
+        df["CostoAcum"] / df["AlimAcumKg"].replace(0, np.nan)
+    )
+
+    df["PrecioKgRealDia"] = (
+        df.sort_values(["LoteCompleto", "Edad"])
+          .groupby("LoteCompleto")["PrecioKgRealDia"]
+          .transform(lambda s: s.ffill().bfill())
+    )
+
     # ── Mortalidad ────────────────────────────────────────────
     if col_mort_ac and col_aves_ini:
-        mort_ac  = parse_num_series(df[col_mort_ac])
+        mort_ac = parse_num_series(df[col_mort_ac])
         aves_ini = parse_num_series(df[col_aves_ini])
         df["MortPct"] = (mort_ac / aves_ini.replace(0, np.nan) * 100).round(2)
     else:
         df["MortPct"] = np.nan
 
     # ── Columnas extra para modelo ML ─────────────────────────
-    if "X4=Edad"            not in df.columns: df["X4=Edad"]            = df["Edad"]
-    if "Edad^2"             not in df.columns: df["Edad^2"]             = df["Edad"] ** 2
-    if "alimento acumulado" not in df.columns: df["alimento acumulado"] = df["AlimAcumKg"]
+    if "X4=Edad" not in df.columns:
+        df["X4=Edad"] = df["Edad"]
+    if "Edad^2" not in df.columns:
+        df["Edad^2"] = df["Edad"] ** 2
+    if "alimento acumulado" not in df.columns:
+        df["alimento acumulado"] = df["AlimAcumKg"]
 
-    return df.sort_values(["LoteCompleto", "Edad"])
+    return df.sort_values(["LoteCompleto", "Edad"]).reset_index(drop=True)
 
 
 # ──────────────────────────────────────────────────────────────
@@ -216,11 +309,14 @@ def load_and_prepare(path: str) -> pd.DataFrame:
 @st.cache_data(show_spinner=False)
 def load_ideales(path: str) -> pd.DataFrame:
     import os
+
     if not os.path.exists(path):
         return pd.DataFrame()
+
     try:
-        xl    = pd.ExcelFile(path)
-        # Prioridad: DATOS_COMPLETOS (legacy) → Sheet1 → primera hoja
+        xl = pd.ExcelFile(path)
+
+        # Prioridad: DATOS_COMPLETOS → Sheet1 → primera hoja
         sheet = xl.sheet_names[0]
         if "DATOS_COMPLETOS" in xl.sheet_names:
             sheet = "DATOS_COMPLETOS"
@@ -230,7 +326,7 @@ def load_ideales(path: str) -> pd.DataFrame:
         df = pd.read_excel(path, sheet_name=sheet)
         df.columns = df.columns.astype(str).str.strip()
 
-        # Zona_Nombre: BUC→BUCAY, STO→SANTO DOMINGO
+        # Zona_Nombre
         zona_col = pick_first_col(df, ["Zona", "zona"])
         if zona_col:
             z = df[zona_col].astype(str).str.upper().str.strip()
@@ -238,8 +334,8 @@ def load_ideales(path: str) -> pd.DataFrame:
         else:
             df["Zona_Nombre"] = "BUCAY"
 
-        # TipoGranja: Propia→PROPIA, PCA→PAC
-        tipo_col = pick_first_col(df, ["TipoGranja", "Tipo_Granja"])
+        # TipoGranja
+        tipo_col = pick_first_col(df, ["TipoGranja", "Tipo_Granja", "TipoGranjero"])
         if tipo_col:
             t = df[tipo_col].astype(str).str.upper().str.strip().str.replace(" ", "", regex=False)
             df["TipoGranja"] = t.map(_TIPO_MAP).fillna("PAC")
@@ -247,8 +343,6 @@ def load_ideales(path: str) -> pd.DataFrame:
             df["TipoGranja"] = "PAC"
 
         # Quintil normalizado
-        # FUENTE PRIMARIA: columna 'Escenario' (ej: "STO_PCA_Q5")
-        # Quintil_Area_Crianza tiene errores documentados — 538 filas con quintil incorrecto
         if "Escenario" in df.columns:
             df["Quintil"] = (
                 df["Escenario"].astype(str).str.upper().str.strip()
@@ -263,13 +357,34 @@ def load_ideales(path: str) -> pd.DataFrame:
                 .fillna("Q5")
             ) if quint_col else "Q5"
 
-        # Asegurar columna 'Peso'
+        # Columnas base benchmark
+        if "Edad" in df.columns:
+            df["Edad"] = parse_num_series(df["Edad"])
+
         if "Peso" not in df.columns:
-            peso_col = pick_first_col(df, ["PesoFinal", "peso", "Peso_ideal"])
+            peso_col = pick_first_col(df, ["PesoFinal", "peso", "Peso_ideal", "PesoIdeal"])
             if peso_col:
                 df["Peso"] = df[peso_col]
 
-        return df
+        if "Peso" in df.columns:
+            df["Peso"] = parse_num_series(df["Peso"])
+
+        # Normalizar FCR ideal
+        if "FCR_ideal" not in df.columns:
+            fcr_col = pick_first_col(df, ["conversio alimenticia", "FCR", "FCRIdeal", "FCR_ideal"])
+            if fcr_col:
+                df["FCR_ideal"] = parse_num_series(df[fcr_col])
+            else:
+                df["FCR_ideal"] = np.nan
+        else:
+            df["FCR_ideal"] = parse_num_series(df["FCR_ideal"])
+
+        # Otras columnas opcionales
+        for c in ["costo_alimento_acumulado", "costo_alimento_dia"]:
+            if c in df.columns:
+                df[c] = parse_num_series(df[c])
+
+        return df.sort_values(["Zona_Nombre", "TipoGranja", "Quintil", "Edad"]).reset_index(drop=True)
 
     except Exception as e:
         st.warning(f"⚠️ Error cargando ideales: {e}")
@@ -278,31 +393,206 @@ def load_ideales(path: str) -> pd.DataFrame:
 
 # ──────────────────────────────────────────────────────────────
 # SNAPSHOT
-# Último registro por lote → una sola Etapa por lote (sin duplicar)
+# Último registro por lote → una sola Etapa por lote
 # ──────────────────────────────────────────────────────────────
 @st.cache_data(show_spinner=False)
 def build_snapshot_activos(df_all: pd.DataFrame) -> pd.DataFrame:
     act = df_all[df_all["Estatus"].astype(str).str.upper().eq("ACTIVO")].copy()
     if act.empty:
         return pd.DataFrame()
+
     snap = (
         act.sort_values(["LoteCompleto", "Edad"])
         .groupby("LoteCompleto", as_index=False)
         .last()
     )
-    # Etapa asignada por edad del snapshot → cada lote pertenece a UNA sola etapa
+
     snap["Etapa"] = snap.apply(
-    lambda r: get_etapa(r["Edad"], r.get("EstadoLote")),
-    axis=1
+        lambda r: get_etapa(r["Edad"], r.get("EstadoLote")),
+        axis=1
     )
+
     return snap
 
 
 # ──────────────────────────────────────────────────────────────
-# GAPS vs IDEAL
+# UTILIDAD: resolver precio/kg real diario
+# ──────────────────────────────────────────────────────────────
+def resolver_precio_kg_real(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+
+    if "PrecioKgRealDia" not in out.columns:
+        out["PrecioKgRealDia"] = np.nan
+
+    if "PrecioKg" in out.columns:
+        out["PrecioKgRealDia"] = out["PrecioKgRealDia"].fillna(
+            pd.to_numeric(out["PrecioKg"], errors="coerce")
+        )
+
+    if "CostoAlimentoDia" in out.columns and "_alim_dia" in out.columns:
+        costo_dia = pd.to_numeric(out["CostoAlimentoDia"], errors="coerce")
+        alim_dia = pd.to_numeric(out["_alim_dia"], errors="coerce")
+        out["PrecioKgRealDia"] = out["PrecioKgRealDia"].fillna(
+            costo_dia / alim_dia.replace(0, np.nan)
+        )
+
+    if "CostoAcum" in out.columns and "AlimAcumKg" in out.columns:
+        costo_acum = pd.to_numeric(out["CostoAcum"], errors="coerce")
+        alim_acum = pd.to_numeric(out["AlimAcumKg"], errors="coerce")
+        out["PrecioKgRealDia"] = out["PrecioKgRealDia"].fillna(
+            costo_acum / alim_acum.replace(0, np.nan)
+        )
+
+    if "LoteCompleto" in out.columns and "Edad" in out.columns:
+        out = out.sort_values(["LoteCompleto", "Edad"]).copy()
+        out["PrecioKgRealDia"] = out.groupby("LoteCompleto")["PrecioKgRealDia"].transform(
+            lambda s: s.ffill().bfill()
+        )
+    else:
+        out["PrecioKgRealDia"] = out["PrecioKgRealDia"].ffill().bfill()
+
+    return out
+
+
+# ──────────────────────────────────────────────────────────────
+# UTILIDAD: historial real + ideal comparable para UN lote
+# ideal_df debe venir filtrado al combo correcto:
+#   Zona_Nombre + TipoGranja + Quintil
+# ──────────────────────────────────────────────────────────────
+def construir_historial_ideal_comparable(
+    hist_df: pd.DataFrame,
+    ideal_df: pd.DataFrame
+) -> pd.DataFrame:
+    """
+    Lógica correcta:
+
+      KgLiveIdeal_comp   = PesoIdeal * AvesVivas_reales
+      AlimIdealAcum_comp = FCR_ideal * KgLiveIdeal_comp
+      AlimIdealDia_comp  = diff(AlimIdealAcum_comp)
+      CostoIdealDia_comp = AlimIdealDia_comp * PrecioKgRealDia
+      CostoIdealComp     = acumulado de CostoIdealDia_comp
+
+    Reglas extra:
+      - usa edad ideal más cercana si no hay match exacto
+      - si _alim_dia == 0 en el lote real, ese día no genera costo ideal
+      - cualquier delta negativo del ideal se fuerza a 0
+    """
+    hist = hist_df.copy().sort_values("Edad").reset_index(drop=True)
+    hist = _ensure_columns(
+        hist,
+        ["Edad", "PesoFinal", "AvesVivas", "CostoAcum", "CostoAlimentoDia", "_alim_dia", "AlimAcumKg", "KgLive", "PrecioKg", "PrecioKgRealDia"]
+    )
+
+    for c in ["Edad", "PesoFinal", "AvesVivas", "CostoAcum", "CostoAlimentoDia", "_alim_dia", "AlimAcumKg", "KgLive", "PrecioKg", "PrecioKgRealDia"]:
+        hist[c] = _safe_num(hist[c])
+
+    hist = resolver_precio_kg_real(hist)
+
+    if "KgLive" not in hist.columns or hist["KgLive"].isna().all():
+        hist["KgLive"] = hist["AvesVivas"] * hist["PesoFinal"]
+
+    if ideal_df is None or ideal_df.empty:
+        return _empty_comp_columns(hist)
+
+    ideal = ideal_df.copy()
+    ideal = _ensure_columns(ideal, ["Edad", "Peso", "FCR_ideal"])
+    ideal["Edad"] = _safe_num(ideal["Edad"])
+    ideal["Peso"] = _safe_num(ideal["Peso"])
+    ideal["FCR_ideal"] = _safe_num(ideal["FCR_ideal"])
+
+    ideal = (
+        ideal[["Edad", "Peso", "FCR_ideal"]]
+        .dropna(subset=["Edad"])
+        .sort_values("Edad")
+        .reset_index(drop=True)
+    )
+
+    if ideal.empty:
+        return _empty_comp_columns(hist)
+
+    hist_merge = pd.merge_asof(
+        hist.sort_values("Edad"),
+        ideal.rename(columns={"Peso": "PesoIdeal_comp"}).sort_values("Edad"),
+        on="Edad",
+        direction="nearest"
+    )
+
+    hist_merge["KgLiveIdeal_comp"] = hist_merge["PesoIdeal_comp"] * hist_merge["AvesVivas"]
+    hist_merge["AlimIdealAcum_comp"] = hist_merge["FCR_ideal"] * hist_merge["KgLiveIdeal_comp"]
+
+    hist_merge["AlimIdealDia_comp"] = hist_merge["AlimIdealAcum_comp"].diff()
+    if not hist_merge.empty:
+        hist_merge.loc[hist_merge.index[0], "AlimIdealDia_comp"] = hist_merge.iloc[0]["AlimIdealAcum_comp"]
+
+    # Regla: no hay consumo negativo
+    hist_merge["AlimIdealDia_comp"] = hist_merge["AlimIdealDia_comp"].clip(lower=0)
+
+    # Regla: si el lote real no consumió alimento ese día, el ideal tampoco debe costearse
+    if "_alim_dia" in hist_merge.columns:
+        mask_sin_gasto = _safe_num(hist_merge["_alim_dia"]).fillna(0).eq(0)
+        hist_merge.loc[mask_sin_gasto, "AlimIdealDia_comp"] = 0
+
+    hist_merge["CostoIdealDia_comp"] = hist_merge["AlimIdealDia_comp"] * hist_merge["PrecioKgRealDia"]
+    hist_merge["CostoIdealDia_comp"] = hist_merge["CostoIdealDia_comp"].fillna(0)
+    hist_merge["CostoIdealComp"] = hist_merge["CostoIdealDia_comp"].cumsum()
+    hist_merge["GapCostoComp"] = hist_merge["CostoAcum"] - hist_merge["CostoIdealComp"]
+
+    return hist_merge
+
+
+# ──────────────────────────────────────────────────────────────
+# ENRIQUECER TODO EL HISTÓRICO CON IDEAL COMPARABLE
+# ──────────────────────────────────────────────────────────────
+@st.cache_data(show_spinner=False)
+def enriquecer_historial_con_ideal(
+    df_hist: pd.DataFrame,
+    ideales_df: pd.DataFrame
+) -> pd.DataFrame:
+    """
+    Enriquece TODO el histórico real con columnas del ideal comparable.
+    Esto se ejecuta una sola vez y luego todos los gráficos reutilizan
+    estas columnas ya calculadas.
+    """
+    if df_hist.empty:
+        return df_hist.copy()
+
+    if ideales_df is None or ideales_df.empty:
+        return _empty_comp_columns(df_hist)
+
+    base = df_hist.copy().sort_values(["LoteCompleto", "Edad"]).reset_index(drop=True)
+    base = resolver_precio_kg_real(base)
+
+    resultados = []
+
+    for lote, hist_lote in base.groupby("LoteCompleto", sort=False):
+        hist_lote = hist_lote.copy().sort_values("Edad").reset_index(drop=True)
+
+        zona = hist_lote["ZonaNombre"].iloc[0] if "ZonaNombre" in hist_lote.columns else None
+        tipo = hist_lote["TipoStd"].iloc[0] if "TipoStd" in hist_lote.columns else None
+        quint = hist_lote["Quintil"].iloc[0] if "Quintil" in hist_lote.columns else None
+
+        ideal_sub = ideales_df[
+            (ideales_df["Zona_Nombre"] == zona) &
+            (ideales_df["TipoGranja"] == tipo) &
+            (ideales_df["Quintil"] == quint)
+        ].copy()
+
+        hist_comp = construir_historial_ideal_comparable(hist_lote, ideal_sub)
+        resultados.append(hist_comp)
+
+    if not resultados:
+        return _empty_comp_columns(base)
+
+    out = pd.concat(resultados, ignore_index=True)
+    return out.sort_values(["LoteCompleto", "Edad"]).reset_index(drop=True)
+
+
+# ──────────────────────────────────────────────────────────────
+# GAPS vs IDEAL · peso promedio de lote vs benchmark
 # ──────────────────────────────────────────────────────────────
 def calcular_gaps_lotes(lotes_ids, df_hist, ideales_df):
     resultados = []
+
     for lote in lotes_ids:
         lote_hist = df_hist[
             (df_hist["LoteCompleto"] == lote) &
@@ -310,14 +600,16 @@ def calcular_gaps_lotes(lotes_ids, df_hist, ideales_df):
         ]
         if lote_hist.empty:
             continue
+
         snap = lote_hist.iloc[-1]
         ideal = ideales_df[
             (ideales_df["Zona_Nombre"] == snap["ZonaNombre"]) &
-            (ideales_df["TipoGranja"]  == snap["TipoStd"]) &
-            (ideales_df["Quintil"]     == snap["Quintil"])
+            (ideales_df["TipoGranja"] == snap["TipoStd"]) &
+            (ideales_df["Quintil"] == snap["Quintil"])
         ]
         if ideal.empty:
             continue
+
         gs = gc = 0
         for _, ir in ideal.iterrows():
             pr = lote_hist[lote_hist["Edad"] == ir.get("Edad")]
@@ -326,78 +618,71 @@ def calcular_gaps_lotes(lotes_ids, df_hist, ideales_df):
                 if g > 0:
                     gs += g
                     gc += 1
+
         if gc > 0:
             resultados.append({"LoteCompleto": lote, "gap_promedio": gs / gc})
+
     return resultados
 
 
 # ──────────────────────────────────────────────────────────────
-# GAP FCR POR GALPÓN  (Sec 02 nueva)
-# Gap = FCR_real − FCR_ideal en el último día del lote
-# Positivo = peor conversión que el ideal
+# GAP FCR / COSTO POR GALPÓN
+# AHORA PRIORIZA COLUMNAS YA ENRIQUECIDAS DESDE EL HISTÓRICO
 # ──────────────────────────────────────────────────────────────
 def calcular_fcr_gaps_galpones(snap_df: pd.DataFrame, ideales_df: pd.DataFrame) -> pd.DataFrame:
     """
-    Calcula gap por lote-galpón usando:
-      - FCR ideal del benchmark
-      - biomasa real actual del lote-galpón
-      - precio_kg real actual del lote-galpón
-
-    Costo ideal recalculado = (FCR_ideal * KgLive_real) * PrecioKg_real
+    Calcula gap por lote-galpón usando el snapshot ya enriquecido.
+    Si el snapshot proviene de enriquecer_historial_con_ideal(), entonces:
+      - CostoIdeal = CostoIdealComp
+      - GapCosto   = GapCostoComp
+      - FCR_ideal  = FCR_ideal del benchmark emparejado por edad
     """
-    if snap_df.empty or ideales_df.empty:
+    if snap_df.empty:
         return pd.DataFrame()
 
-    fcr_col = "conversio alimenticia" if "conversio alimenticia" in snap_df.columns else "FCR_Cum"
+    snap = snap_df.copy()
+
+    # Si no viene enriquecido, devolvemos lo que sí tengamos sin romper
+    snap = _ensure_columns(
+        snap,
+        [
+            "GranjaID", "Granja", "NombreGranja", "Galpon", "LoteCompleto", "Edad",
+            "AvesVivas", "KgLive", "PrecioKgRealDia", "PrecioKg",
+            "PesoIdeal_comp", "KgLiveIdeal_comp", "AlimIdealAcum_comp",
+            "FCR_Cum", "FCR_ideal", "CostoAcum", "CostoIdealComp", "GapCostoComp",
+            "ZonaNombre", "TipoStd", "Quintil"
+        ]
+    )
 
     filas = []
-    for _, row in snap_df.iterrows():
+    for _, row in snap.iterrows():
         edad_lote = int(row.get("Edad", 0) or 0)
         if edad_lote < EDAD_MIN_ANALISIS:
             continue
 
-        ideal_sub = ideales_df[
-            (ideales_df["Zona_Nombre"] == row["ZonaNombre"]) &
-            (ideales_df["TipoGranja"]  == row["TipoStd"]) &
-            (ideales_df["Quintil"]     == row["Quintil"])
-        ].copy()
+        fcr_real = _safe_num(pd.Series([row.get("FCR_Cum", np.nan)])).iloc[0]
+        fcr_ideal = _safe_num(pd.Series([row.get("FCR_ideal", np.nan)])).iloc[0]
 
-        if ideal_sub.empty:
-            continue
+        costo_real = _safe_num(pd.Series([row.get("CostoAcum", np.nan)])).iloc[0]
+        costo_ideal = _safe_num(pd.Series([row.get("CostoIdealComp", np.nan)])).iloc[0]
+        gap_costo = _safe_num(pd.Series([row.get("GapCostoComp", np.nan)])).iloc[0]
 
-        dia_exact = ideal_sub[ideal_sub["Edad"] == edad_lote]
-        if not dia_exact.empty:
-            fila_ideal = dia_exact.iloc[0]
-        else:
-            fila_ideal = ideal_sub.iloc[(ideal_sub["Edad"] - edad_lote).abs().argsort()[:1]].iloc[0]
-
-        fcr_real = float(row.get(fcr_col, np.nan)) if pd.notna(row.get(fcr_col, np.nan)) else np.nan
-        if pd.isna(fcr_real):
-            continue
-
-        fcr_ideal = float(fila_ideal["conversio alimenticia"]) if "conversio alimenticia" in fila_ideal.index else np.nan
-        if pd.isna(fcr_ideal):
-            continue
-
-        kg_live    = float(row.get("KgLive", 0) or 0)
-        costo_real = float(row.get("CostoAcum", 0) or 0)
-
-        # PrecioKg real del lote-galpón actual
-        precio_kg_real = float(row.get("PrecioKg", np.nan)) if pd.notna(row.get("PrecioKg", np.nan)) else np.nan
-
-        # fallback robusto
+        kg_live_real = _safe_num(pd.Series([row.get("KgLive", np.nan)])).iloc[0]
+        precio_kg_real = _safe_num(pd.Series([row.get("PrecioKgRealDia", np.nan)])).iloc[0]
         if pd.isna(precio_kg_real):
-            alim_acum = float(row.get("AlimAcumKg", np.nan)) if pd.notna(row.get("AlimAcumKg", np.nan)) else np.nan
-            if pd.notna(alim_acum) and alim_acum > 0 and pd.notna(costo_real):
-                precio_kg_real = costo_real / alim_acum
+            precio_kg_real = _safe_num(pd.Series([row.get("PrecioKg", np.nan)])).iloc[0]
 
-        # Recalcular ideal con biomasa real y precio real
-        alim_ideal_acum = fcr_ideal * kg_live if pd.notna(fcr_ideal) and pd.notna(kg_live) else np.nan
-        costo_ideal_calc = alim_ideal_acum * precio_kg_real if pd.notna(alim_ideal_acum) and pd.notna(precio_kg_real) else np.nan
+        gap_fcr = (
+            fcr_real - fcr_ideal
+            if pd.notna(fcr_real) and pd.notna(fcr_ideal)
+            else np.nan
+        )
 
-        gap_fcr      = fcr_real - fcr_ideal if pd.notna(fcr_real) and pd.notna(fcr_ideal) else np.nan
-        gap_costo    = costo_real - costo_ideal_calc if pd.notna(costo_real) and pd.notna(costo_ideal_calc) else np.nan
-        gap_costo_kg = gap_costo / kg_live if pd.notna(gap_costo) and pd.notna(kg_live) and kg_live > 0 else np.nan
+        gap_costo_kg = (
+            gap_costo / kg_live_real
+            if pd.notna(gap_costo) and pd.notna(kg_live_real) and kg_live_real > 0
+            else np.nan
+        )
 
         filas.append({
             "Granja":         str(row.get("GranjaID", row.get("Granja", "—"))),
@@ -406,32 +691,36 @@ def calcular_fcr_gaps_galpones(snap_df: pd.DataFrame, ideales_df: pd.DataFrame) 
             "LoteCompleto":   row["LoteCompleto"],
             "Edad":           edad_lote,
 
-            "KgLive":         kg_live,
+            "AvesVivas":      row.get("AvesVivas", np.nan),
+            "KgLive":         kg_live_real,
+            "PesoIdeal":      row.get("PesoIdeal_comp", np.nan),
+            "KgLiveIdeal":    row.get("KgLiveIdeal_comp", np.nan),
             "PrecioKgReal":   precio_kg_real,
-            "AlimIdealAcum":  alim_ideal_acum,
+            "AlimIdealAcum":  row.get("AlimIdealAcum_comp", np.nan),
 
-            "FCR_real":       round(fcr_real, 4),
-            "FCR_ideal":      round(fcr_ideal, 4),
-            "Gap_FCR":        round(gap_fcr, 4) if pd.notna(gap_fcr) else np.nan,
+            "FCR_real":       round(float(fcr_real), 4) if pd.notna(fcr_real) else np.nan,
+            "FCR_ideal":      round(float(fcr_ideal), 4) if pd.notna(fcr_ideal) else np.nan,
+            "Gap_FCR":        round(float(gap_fcr), 4) if pd.notna(gap_fcr) else np.nan,
 
             "CostoReal":      costo_real,
-            "CostoIdeal":     costo_ideal_calc,
+            "CostoIdeal":     costo_ideal,
             "GapCosto":       gap_costo,
             "GapCostoKg":     gap_costo_kg,
 
-            "ZonaNombre":     row["ZonaNombre"],
-            "TipoStd":        row["TipoStd"],
-            "Quintil":        row["Quintil"],
+            "ZonaNombre":     row.get("ZonaNombre", np.nan),
+            "TipoStd":        row.get("TipoStd", np.nan),
+            "Quintil":        row.get("Quintil", np.nan),
         })
 
     return pd.DataFrame(filas)
 
+
 # ──────────────────────────────────────────────────────────────
-# RESUMEN A NIVEL DE GRANJA  (Sec 02 gráfico de barras)
+# RESUMEN A NIVEL DE GRANJA
 # ──────────────────────────────────────────────────────────────
 def calcular_fcr_gaps_granjas(gaps_df: pd.DataFrame, top_n: int = 10) -> pd.DataFrame:
     """
-    Resume por granja el sobrecosto recalculado vs ideal.
+    Resume por granja el sobrecosto recalculado vs ideal comparable.
     """
     if gaps_df.empty:
         return pd.DataFrame()
@@ -443,14 +732,14 @@ def calcular_fcr_gaps_granjas(gaps_df: pd.DataFrame, top_n: int = 10) -> pd.Data
     grp = (
         con_prob.groupby(["Granja", "NombreGranja"])
         .agg(
-            NumGalpones    = ("Galpon", "nunique"),
-            KgLiveTotal    = ("KgLive", "sum"),
-            FCR_real       = ("FCR_real", "mean"),
-            FCR_ideal      = ("FCR_ideal", "mean"),
-            Gap_FCR_medio  = ("Gap_FCR", "mean"),
-            CostoRealTotal = ("CostoReal", "sum"),
-            CostoIdealTotal= ("CostoIdeal", "sum"),
-            GapCostoTotal  = ("GapCosto", "sum"),
+            NumGalpones     = ("Galpon", "nunique"),
+            KgLiveTotal     = ("KgLive", "sum"),
+            FCR_real        = ("FCR_real", "mean"),
+            FCR_ideal       = ("FCR_ideal", "mean"),
+            Gap_FCR_medio   = ("Gap_FCR", "mean"),
+            CostoRealTotal  = ("CostoReal", "sum"),
+            CostoIdealTotal = ("CostoIdeal", "sum"),
+            GapCostoTotal   = ("GapCosto", "sum"),
         )
         .reset_index()
     )
@@ -463,34 +752,36 @@ def calcular_fcr_gaps_granjas(gaps_df: pd.DataFrame, top_n: int = 10) -> pd.Data
     ).head(top_n).reset_index(drop=True)
 
     return grp
+
+
 # ──────────────────────────────────────────────────────────────
-# CURVA IDEAL PROMEDIADA PARA UN LOTE  (Sec 03)
-# Promedia Peso, FCR, CostoAcum y CostoDia de TODOS los lotes
-# ideales del mismo combo (Zona·Tipo·Quintil) por día.
-# Devuelve DataFrame con: Edad, Peso, FCR_ideal,
-#   CostoAcum_ideal, CostoDia_ideal
+# CURVA IDEAL PROMEDIADA PARA UN LOTE
 # ──────────────────────────────────────────────────────────────
-def get_curva_ideal_promedio(zona: str, tipo: str, quintil: str,
-                             ideales_df: pd.DataFrame,
-                             edad_max: int | None = None) -> pd.DataFrame:
-    """
-    Parámetros normalizados: zona='BUCAY', tipo='PROPIA', quintil='Q2'
-    """
+def get_curva_ideal_promedio(
+    zona: str,
+    tipo: str,
+    quintil: str,
+    ideales_df: pd.DataFrame,
+    edad_max: int | None = None
+) -> pd.DataFrame:
     sub = ideales_df[
         (ideales_df["Zona_Nombre"] == zona) &
-        (ideales_df["TipoGranja"]  == tipo) &
-        (ideales_df["Quintil"]     == quintil)
+        (ideales_df["TipoGranja"] == tipo) &
+        (ideales_df["Quintil"] == quintil)
     ].copy()
 
     if sub.empty:
         return pd.DataFrame()
 
-    # Columnas disponibles
     agg_dict = {}
-    if "Peso"                     in sub.columns: agg_dict["Peso"]             = ("Peso",                     "mean")
-    if "conversio alimenticia"    in sub.columns: agg_dict["FCR_ideal"]        = ("conversio alimenticia",    "mean")
-    if "costo_alimento_acumulado" in sub.columns: agg_dict["CostoAcum_ideal"]  = ("costo_alimento_acumulado", "mean")
-    if "costo_alimento_dia"       in sub.columns: agg_dict["CostoDia_ideal"]   = ("costo_alimento_dia",       "mean")
+    if "Peso" in sub.columns:
+        agg_dict["Peso"] = ("Peso", "mean")
+    if "FCR_ideal" in sub.columns:
+        agg_dict["FCR_ideal"] = ("FCR_ideal", "mean")
+    if "costo_alimento_acumulado" in sub.columns:
+        agg_dict["CostoAcum_ideal"] = ("costo_alimento_acumulado", "mean")
+    if "costo_alimento_dia" in sub.columns:
+        agg_dict["CostoDia_ideal"] = ("costo_alimento_dia", "mean")
 
     if not agg_dict:
         return pd.DataFrame()
@@ -502,102 +793,107 @@ def get_curva_ideal_promedio(zona: str, tipo: str, quintil: str,
 
     return cur
 
-# ══════════════════════════════════════════════════════════════════════════════
-# TOP 10 PEORES GRANJAS POR CONVERSIÓN ALIMENTICIA
-# ══════════════════════════════════════════════════════════════════════════════
 
+# ══════════════════════════════════════════════════════════════
+# TOP 10 PEORES GRANJAS POR CONVERSIÓN ALIMENTICIA
+# ══════════════════════════════════════════════════════════════
 def agrupar_granjalote(df):
     """
-    Agrupa por LoteCompleto (GRANJA-LOTE) y toma el ÚLTIMO registro
-    (máxima Edad = snapshot), que contiene la conversión acumulada real.
-    Compatible con el DataFrame que genera load_and_prepare().
+    Agrupa por LoteCompleto (GRANJA-LOTE) y toma el último registro.
     """
     df = df.copy()
+    df["Granja"] = df["LoteCompleto"].astype(str).str.split("-").str[0]
 
-    # Código de granja: primera parte de LoteCompleto (ej: BUC1002)
-    df['Granja'] = df['LoteCompleto'].str.split('-').str[0]
+    alim_col = "AlimAcumKg" if "AlimAcumKg" in df.columns else (
+        "Alimento_Acumulado" if "Alimento_Acumulado" in df.columns else None
+    )
+    peso_col = "PesoFinal" if "PesoFinal" in df.columns else (
+        "Peso" if "Peso" in df.columns else None
+    )
+    costo_col = "CostoAcum" if "CostoAcum" in df.columns else "costo_alimento_acumulado"
+    galpon_col = "Galpon" if "Galpon" in df.columns else None
 
-    # Detectar columnas flexibles
-    alim_col  = 'AlimAcumKg'  if 'AlimAcumKg'  in df.columns else (
-                'Alimento_Acumulado' if 'Alimento_Acumulado' in df.columns else None)
-    peso_col  = 'PesoFinal'   if 'PesoFinal'   in df.columns else (
-                'Peso'        if 'Peso'         in df.columns else None)
-    costo_col = 'CostoAcum'   if 'CostoAcum'   in df.columns else 'costo_alimento_acumulado'
-    galpon_col = 'Galpon'     if 'Galpon'       in df.columns else None
+    conv_col = "conversio alimenticia" if "conversio alimenticia" in df.columns else "FCR_Cum"
 
     agg_dict = {
-        'conversio alimenticia': 'last',   # último día = FCR acumulado real
-        'Codigo_Unico':          'first',
-        'Granja':                'first',
-        'NombreGranja':          'first',
-        costo_col:               'max',
-        'Edad':                  'max',
+        conv_col:        "last",
+        "Granja":        "first",
+        "NombreGranja":  "first" if "NombreGranja" in df.columns else "first",
+        costo_col:       "max",
+        "Edad":          "max",
     }
-    if alim_col:  agg_dict[alim_col]  = 'max'
-    if peso_col:  agg_dict[peso_col]  = 'max'
-    if galpon_col: agg_dict[galpon_col] = 'first'
+
+    if "Codigo_Unico" in df.columns:
+        agg_dict["Codigo_Unico"] = "first"
+    if alim_col:
+        agg_dict[alim_col] = "max"
+    if peso_col:
+        agg_dict[peso_col] = "max"
+    if galpon_col:
+        agg_dict[galpon_col] = "first"
 
     df_granjalote = (
-        df.sort_values(['LoteCompleto', 'Edad'])
-        .groupby('LoteCompleto')
+        df.sort_values(["LoteCompleto", "Edad"])
+        .groupby("LoteCompleto")
         .agg(agg_dict)
         .reset_index()
     )
 
-    # Renombres estables
     rename_map = {
-        'conversio alimenticia': 'Conv_GranjaLote',
-        costo_col:               'CostoAcum',
+        conv_col:  "Conv_GranjaLote",
+        costo_col: "CostoAcum",
     }
-    if alim_col:   rename_map[alim_col]  = 'AlimAcumKg'
-    if peso_col:   rename_map[peso_col]  = 'Peso'
-    df_granjalote = df_granjalote.rename(columns=rename_map)
+    if alim_col:
+        rename_map[alim_col] = "AlimAcumKg"
+    if peso_col:
+        rename_map[peso_col] = "Peso"
 
+    df_granjalote = df_granjalote.rename(columns=rename_map)
     return df_granjalote
 
 
 def agrupar_granjas_top10(df_granjalote, top_n=10):
     """
-    Agrupa por GRANJA y calcula FCR promedio de sus lotes.
-    Retorna TOP N peores (mayor FCR = peor conversión).
-    Incluye NombreGranja para mostrar en el gráfico.
+    Agrupa por granja y calcula FCR promedio de sus lotes.
     """
     agg_dict = {
-        'LoteCompleto':    'count',
-        'Conv_GranjaLote': ['mean', 'max', 'min'],
-        'CostoAcum':       'sum',
-        'NombreGranja':    'first',
+        "LoteCompleto":    "count",
+        "Conv_GranjaLote": ["mean", "max", "min"],
+        "CostoAcum":       "sum",
     }
-    if 'AlimAcumKg' in df_granjalote.columns:
-        agg_dict['AlimAcumKg'] = 'sum'
-    if 'Edad' in df_granjalote.columns:
-        agg_dict['Edad'] = 'mean'
 
-    df_granjas = df_granjalote.groupby('Granja').agg(agg_dict).reset_index()
+    if "NombreGranja" in df_granjalote.columns:
+        agg_dict["NombreGranja"] = "first"
+    if "AlimAcumKg" in df_granjalote.columns:
+        agg_dict["AlimAcumKg"] = "sum"
+    if "Edad" in df_granjalote.columns:
+        agg_dict["Edad"] = "mean"
 
-    # Aplanar columnas multi-nivel
-    df_granjas.columns = ['_'.join(c).strip('_') if isinstance(c, tuple) else c
-                          for c in df_granjas.columns]
+    df_granjas = df_granjalote.groupby("Granja").agg(agg_dict).reset_index()
+
+    df_granjas.columns = [
+        "_".join(c).strip("_") if isinstance(c, tuple) else c
+        for c in df_granjas.columns
+    ]
 
     col_map = {
-        'LoteCompleto_count':    'NumLotes',
-        'Conv_GranjaLote_mean':  'Conv_Promedio',
-        'Conv_GranjaLote_max':   'Conv_Max',
-        'Conv_GranjaLote_min':   'Conv_Min',
-        'CostoAcum_sum':         'CostoTotal',
-        'NombreGranja_first':    'NombreGranja',
-        'AlimAcumKg_sum':        'AlimTotal',
-        'Edad_mean':             'EdadPromedio',
+        "LoteCompleto_count":   "NumLotes",
+        "Conv_GranjaLote_mean": "Conv_Promedio",
+        "Conv_GranjaLote_max":  "Conv_Max",
+        "Conv_GranjaLote_min":  "Conv_Min",
+        "CostoAcum_sum":        "CostoTotal",
+        "NombreGranja_first":   "NombreGranja",
+        "AlimAcumKg_sum":       "AlimTotal",
+        "Edad_mean":            "EdadPromedio",
     }
-    df_granjas = df_granjas.rename(columns={k: v for k, v in col_map.items()
-                                            if k in df_granjas.columns})
+    df_granjas = df_granjas.rename(columns={k: v for k, v in col_map.items() if k in df_granjas.columns})
 
-    return df_granjas.sort_values('Conv_Promedio', ascending=False).head(top_n).reset_index(drop=True)
+    return df_granjas.sort_values("Conv_Promedio", ascending=False).head(top_n).reset_index(drop=True)
 
 
 def filtrar_lotes_granja(df_granjalote, granja_codigo):
     """
     Devuelve los lotes/galpones de una granja, ordenados por peor FCR primero.
     """
-    lotes = df_granjalote[df_granjalote['Granja'] == granja_codigo].copy()
-    return lotes.sort_values('Conv_GranjaLote', ascending=False).reset_index(drop=True)
+    lotes = df_granjalote[df_granjalote["Granja"] == granja_codigo].copy()
+    return lotes.sort_values("Conv_GranjaLote", ascending=False).reset_index(drop=True)

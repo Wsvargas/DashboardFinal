@@ -1,23 +1,9 @@
-"""
-PRONACA | Dashboard Producción Avícola v15 — MODULARIZADO
-=========================================================
-Módulos externos:
-  config.py       → constantes (colores, archivos, etapas)
-  helpers.py      → funciones utilitarias
-  styles.py       → inject_css()
-  data_loader.py  → carga y procesamiento de datos
-
-Ejecutar:
-    streamlit run dashboard_produccion_v15_CON_BOTON.py
-"""
 import os
 import numpy as np
 import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
 from datetime import datetime
-
-
 
 # ── Módulos propios ───────────────────────────────────────────
 from config import (
@@ -26,10 +12,23 @@ from config import (
     ETAPA_ORDER, ETAPA_COLORS,
 )
 
+from helpers import (
+    md, _file_mtime, get_etapa, fmt_num,
+    extract_lote_codigo, _console_df_info,
+    _limpiar_historial_para_modelo,
+)
+
+from styles import inject_css
+
+from data_loader import (
+    load_and_prepare, load_ideales,
+    build_snapshot_activos, enriquecer_historial_con_ideal,
+    calcular_gaps_lotes, calcular_fcr_gaps_galpones,
+    calcular_fcr_gaps_granjas, get_curva_ideal_promedio,
+)
+
 CHART_TEXT = BLACK
 
-
-CHART_TEXT = BLACK
 
 def fmt_manager(n, prefix="", suffix=""):
     if pd.isna(n):
@@ -50,24 +49,11 @@ def fmt_manager(n, prefix="", suffix=""):
     return f"{sign}{prefix}{txt}{suffix}"
 
 
-from helpers import (
-    md, _file_mtime, get_etapa, fmt_num,
-    extract_lote_codigo, _console_df_info,
-    _limpiar_historial_para_modelo,
-)
-from styles      import inject_css
-from data_loader import (
-    load_and_prepare, load_ideales,
-    build_snapshot_activos, calcular_gaps_lotes,
-    calcular_fcr_gaps_galpones, calcular_fcr_gaps_granjas,
-    get_curva_ideal_promedio,
-)
-
 # ──────────────────────────────────────────────────────────────
 # PAGE CONFIG
 # ──────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="PRONACA | Producción Avícola v15",
+    page_title="\n PRONACA | Producción Avícola v15",
     layout="wide",
     initial_sidebar_state="collapsed",
 )
@@ -78,13 +64,16 @@ st.set_page_config(
 if "page" not in st.session_state:
     st.session_state["page"] = "dashboard"
 
+
 def go_predictiva():
     st.session_state["page"] = "predictiva"
     st.rerun()
 
+
 def go_dashboard():
     st.session_state["page"] = "dashboard"
     st.rerun()
+
 
 if st.session_state["page"] == "predictiva":
     import tool_predictiva
@@ -112,19 +101,24 @@ if not os.path.exists(MAIN_FILE):
     st.stop()
 
 with st.spinner("Cargando datos…"):
-    DF      = load_and_prepare(MAIN_FILE)
+    DF_ALL = load_and_prepare(MAIN_FILE)
     IDEALES = load_ideales(BENCH_FILE)
 
+with st.spinner("Procesando histórico comparable…"):
+    DF_HIST_COMP = enriquecer_historial_con_ideal(DF_ALL, IDEALES)
+
 with st.spinner("Procesando snapshot…"):
-    SNAP = build_snapshot_activos(DF)
+    SNAP = build_snapshot_activos(DF_HIST_COMP)
 
 if SNAP.empty:
     st.warning("No hay lotes ACTIVO en el archivo.")
     st.stop()
 
 # ── Session state ─────────────────────────────────────────────
-if "lote_anterior"        not in st.session_state: st.session_state.lote_anterior        = None
-if "prediccion_resultado" not in st.session_state: st.session_state.prediccion_resultado = None
+if "lote_anterior" not in st.session_state:
+    st.session_state.lote_anterior = None
+if "prediccion_resultado" not in st.session_state:
+    st.session_state.prediccion_resultado = None
 
 # ──────────────────────────────────────────────────────────────
 # HEADER
@@ -133,6 +127,7 @@ hoy = datetime.today()
 md(f"""
 <div class="pronaca-header">
   <div>
+    <div class="pronaca-header-title">----</div>
     <div class="pronaca-header-title">PRONACA · PRODUCCIÓN AVÍCOLA v15</div>
     <div class="pronaca-header-sub">Dashboard Interactivo · Con Botón de Predicción Manual</div>
   </div>
@@ -145,13 +140,19 @@ md(f"""
 # ──────────────────────────────────────────────────────────────
 md('<div class="filter-bar">')
 fc1, fc2, fc3, fc4, fc5 = st.columns([1.3, 1.2, 1.2, 1.2, 1.35])
-with fc1: sel_zona   = st.multiselect("📍 Zona",    ["BUCAY","SANTO DOMINGO"],  default=["BUCAY","SANTO DOMINGO"])
-with fc2: sel_tipo   = st.multiselect("🏠 Tipo",    ["PROPIA","PAC"],           default=["PROPIA","PAC"])
-with fc3: sel_quint  = st.multiselect("🧩 Quintil", ["Q1","Q2","Q3","Q4","Q5"], default=["Q1","Q2","Q3","Q4","Q5"])
-with fc4: sel_estado = st.multiselect("🔄 Estado",  ["ABIERTO","CERRADO"],      default=["ABIERTO","CERRADO"])
-with fc5: st.button("🧠 Herramienta predictiva", use_container_width=True, on_click=go_predictiva)
+with fc1:
+    sel_zona = st.multiselect("📍 Zona", ["BUCAY", "SANTO DOMINGO"], default=["BUCAY", "SANTO DOMINGO"])
+with fc2:
+    sel_tipo = st.multiselect("🏠 Tipo", ["PROPIA", "PAC"], default=["PROPIA", "PAC"])
+with fc3:
+    sel_quint = st.multiselect("🧩 Quintil", ["Q1", "Q2", "Q3", "Q4", "Q5"], default=["Q2", "Q3", "Q4", "Q5"])
+with fc4:
+    sel_estado = st.multiselect("🔄 Estado", ["ABIERTO", "CERRADO"], default=["ABIERTO"])
+with fc5:
+    st.button("🧠 Herramienta predictiva", use_container_width=True, on_click=go_predictiva)
 md("</div>")
 
+# ── Snapshot filtrado por filtros globales ───────────────────
 SF = SNAP.copy()
 SF = SF[SF["ZonaNombre"].isin(sel_zona)]
 SF = SF[SF["TipoStd"].isin(sel_tipo)]
@@ -162,25 +163,31 @@ if SF.empty:
     st.info("Sin datos para los filtros seleccionados.")
     st.stop()
 
-LOTES_FILTRADOS = SF["LoteCompleto"].unique()
-DF_FILTRADO     = DF[DF["LoteCompleto"].isin(LOTES_FILTRADOS)].copy()
+LOTES_FILTRADOS = SF["LoteCompleto"].dropna().unique().tolist()
+DF_FILTRADO = DF_HIST_COMP[DF_HIST_COMP["LoteCompleto"].isin(LOTES_FILTRADOS)].copy()
 
 # ──────────────────────────────────────────────────────────────
 # KPIs GLOBALES
 # ──────────────────────────────────────────────────────────────
-kg_total    = SF["KgLive"].sum()
-costo_total = SF["CostoAcum"].sum()
-cpkg        = costo_total / (kg_total if kg_total else np.nan)
-granjas_total = SF["Granja"].nunique() if "Granja" in SF.columns else SF["NombreGranja"].nunique()
+kg_total = pd.to_numeric(SF["KgLive"], errors="coerce").sum()
+costo_total = pd.to_numeric(SF["CostoAcum"], errors="coerce").sum()
+cpkg = costo_total / (kg_total if pd.notna(kg_total) and kg_total > 0 else np.nan)
+
+if "Granja" in SF.columns:
+    granjas_total = SF["Granja"].nunique()
+elif "GranjaID" in SF.columns:
+    granjas_total = SF["GranjaID"].nunique()
+else:
+    granjas_total = SF["NombreGranja"].nunique()
 
 k1, k2, k3, k4, k5, k6 = st.columns(6)
 for col_, val_, lbl_, acc in [
-    (k1, f"{SF['LoteCompleto'].nunique():,}",        "Lotes activos",   True),
-    (k2, f"{granjas_total:,}",                       "Granjas totales", True),
-    (k3, fmt_manager(SF["AvesVivas"].sum()),         "Aves vivas",      True),
-    (k4, fmt_manager(kg_total, suffix=" kg"),        "Kg live",         True),
-    (k5, fmt_manager(costo_total, prefix="$"),       "Costo total",     True),
-    (k6, fmt_num(cpkg, 3, prefix="$", suffix="/kg"), "Costo medio/kg",  False),
+    (k1, f"{SF['LoteCompleto'].nunique():,}", "Lotes activos", True),
+    (k2, f"{granjas_total:,}", "Granjas totales", True),
+    (k3, fmt_manager(pd.to_numeric(SF["AvesVivas"], errors="coerce").sum()), "Aves vivas", True),
+    (k4, fmt_manager(kg_total, suffix=" kg"), "Kg live", True),
+    (k5, fmt_manager(costo_total, prefix="$"), "Costo total", True),
+    (k6, fmt_num(cpkg, 3, prefix="$", suffix="/kg"), "Costo medio/kg", False),
 ]:
     with col_:
         md(f'<div class="kpi-chip {"accent" if acc else ""}"><div class="kv">{val_}</div><div class="kl">{lbl_}</div></div>')
@@ -208,99 +215,161 @@ with left:
     rows_etapa = []
     for etapa in ETAPA_ORDER:
         g = SF[SF["Etapa"] == etapa]
-        if g.empty: continue
-        n   = g["LoteCompleto"].nunique()
-        av  = g["AvesVivas"].sum()
-        kg  = g["KgLive"].sum()
-        co  = g["CostoAcum"].sum()
-        mo  = g["MortPct"].mean()
-        al  = g["AlimAcumKg"].sum()
-        fcr = al / kg if kg > 0 else np.nan
-        ck  = co / kg if kg > 0 else np.nan
+        if g.empty:
+            continue
+
+        n = g["LoteCompleto"].nunique()
+        av = pd.to_numeric(g["AvesVivas"], errors="coerce").sum()
+        kg = pd.to_numeric(g["KgLive"], errors="coerce").sum()
+        co = pd.to_numeric(g["CostoAcum"], errors="coerce").sum()
+        mo = pd.to_numeric(g["MortPct"], errors="coerce").mean()
+        al = pd.to_numeric(g["AlimAcumKg"], errors="coerce").sum()
+        fcr = al / kg if pd.notna(kg) and kg > 0 else np.nan
+        ck = co / kg if pd.notna(kg) and kg > 0 else np.nan
+
         bdg = "green"
-        if pd.notna(ck) and ck >= 0.9:    bdg = "red"
-        elif pd.notna(ck) and ck >= 0.75: bdg = "amber"
-        rows_etapa.append((etapa, n, av, kg, fcr, co, ck, mo, bdg))
+        if pd.notna(ck) and ck >= 0.9:
+            bdg = "red"
+        elif pd.notna(ck) and ck >= 0.75:
+            bdg = "amber"
+
+        etapa_txt = str(etapa)
+        rango_txt = etapa_txt
+        if "(" in etapa_txt and ")" in etapa_txt:
+            rango_txt = etapa_txt.split("(")[-1].split(")")[0].strip()
+
+        rows_etapa.append({
+            "etapa_full": etapa,
+            "rango": rango_txt,
+            "n": n,
+            "av": av,
+            "kg": kg,
+            "co": co,
+            "fcr": fcr,
+            "ck": ck,
+            "mo": mo,
+            "bdg": bdg,
+            "dot": ETAPA_COLORS.get(etapa, BLUE),
+        })
 
     cg, ct = st.columns([0.4, 0.6], gap="small")
+
     with cg:
+        df_etapas_plot = pd.DataFrame(rows_etapa).copy()
+
         fig_e = go.Figure()
         fig_e.add_trace(go.Bar(
-            x=[r[0] for r in rows_etapa],
-            y=[r[1] for r in rows_etapa],
-            marker=dict(color=[ETAPA_COLORS.get(r[0], BLUE) for r in rows_etapa]),
-            text=[r[1] for r in rows_etapa],
+            y=df_etapas_plot["rango"],
+            x=df_etapas_plot["n"],
+            orientation="h",
+            marker=dict(color=df_etapas_plot["dot"]),
+            text=df_etapas_plot["n"],
             textposition="auto",
-            textfont=dict(color=CHART_TEXT, size=11),
-            hovertemplate="<b>%{x}</b><br>Lotes: %{y}<extra></extra>",
-        ))
-        fig_e.update_layout(
-            template="plotly_white", paper_bgcolor=CARD, plot_bgcolor=CARD,
-            height=240, margin=dict(l=8, r=8, t=18, b=50),
-            font=dict(family="DM Sans", size=9, color=CHART_TEXT), showlegend=False,
-            xaxis=dict(
-                title="",
-                gridcolor=BORDER,
-                color=CHART_TEXT,
-                tickfont=dict(color=CHART_TEXT),
-                title_font=dict(color=CHART_TEXT),
-                tickangle=-45
+            textfont=dict(color=CHART_TEXT, size=10),
+            customdata=df_etapas_plot[["etapa_full", "co", "kg", "ck", "fcr", "mo"]].values,
+            hovertemplate=(
+                "<b>Rango %{y} días</b><br>"
+                "Lotes: %{x}<br>"
+                "Costo: %{customdata[1]:,.0f}<br>"
+                "Kg live: %{customdata[2]:,.0f}<br>"
+                "Cost_Al_Conv: %{customdata[3]:.3f}<br>"
+                "Con_A: %{customdata[4]:.3f}<br>"
+                "Mortalidad: %{customdata[5]:.2f}%"
+                "<extra></extra>"
             ),
-            yaxis=dict(
+        ))
+
+        fig_e.update_layout(
+            template="plotly_white",
+            paper_bgcolor=CARD,
+            plot_bgcolor=CARD,
+            height=240,
+            margin=dict(l=8, r=8, t=10, b=8),
+            font=dict(family="DM Sans", size=8, color=CHART_TEXT),
+            showlegend=False,
+            xaxis=dict(
                 title="Lotes",
                 gridcolor=BORDER,
                 color=CHART_TEXT,
-                tickfont=dict(color=CHART_TEXT),
-                title_font=dict(color=CHART_TEXT)
+                tickfont=dict(color=CHART_TEXT, size=8),
+                title_font=dict(color=CHART_TEXT, size=8),
             ),
+            yaxis=dict(
+                title="",
+                gridcolor=BORDER,
+                color=CHART_TEXT,
+                tickfont=dict(color=CHART_TEXT, size=8),
+                title_font=dict(color=CHART_TEXT, size=8),
+                autorange="reversed",
+            ),
+            bargap=0.22,
         )
+
         sel_e = st.plotly_chart(
-            fig_e, on_select="rerun", selection_mode="points",
-            key="chart_etapas", config={"displayModeBar": False}, width="stretch",
+            fig_e,
+            on_select="rerun",
+            selection_mode="points",
+            key="chart_etapas",
+            config={"displayModeBar": False},
+            width="stretch",
         )
-        etapas_sel = [p["x"] for p in sel_e.selection.get("points", []) if "x" in p]
+
+        etapas_sel = []
+        if sel_e and sel_e.selection:
+            for p in sel_e.selection.get("points", []):
+                idx = p.get("point_index")
+                if idx is not None and 0 <= idx < len(df_etapas_plot):
+                    etapas_sel.append(df_etapas_plot.iloc[idx]["etapa_full"])
+
         if etapas_sel:
-            md(f'<div class="sel-pill">🔍 Filtrando: {" + ".join([e.split("(")[0].strip() for e in etapas_sel])}</div>')
+            rangos_sel = [
+                df_etapas_plot.loc[df_etapas_plot["etapa_full"] == e, "rango"].iloc[0]
+                for e in etapas_sel
+                if not df_etapas_plot.loc[df_etapas_plot["etapa_full"] == e, "rango"].empty
+            ]
+            md(f'<div class="sel-pill">🔍 Filtrando: {" + ".join(rangos_sel)}</div>')
         else:
             md('<div class="hint-text">Clic en barra para filtrar ↓</div>')
 
     with ct:
         tbody = ""
-        for etapa, n, av, kg, fcr, co, ck, mo, bdg in rows_etapa:
-            dot = ETAPA_COLORS.get(etapa, BLUE)
-            act = etapa in etapas_sel if etapas_sel else False
+        for r in rows_etapa:
+            act = r["etapa_full"] in etapas_sel if etapas_sel else False
+
             tbody += f"""
 <tr style="border-bottom:1px solid {BORDER};background:{'rgba(218,41,28,.05)' if act else 'transparent'}">
-  <td style="padding:6px 8px;font-weight:{'900' if act else '700'};font-size:.73rem;text-align:left">
+<td style="padding:4px 6px;font-weight:{'900' if act else '700'};font-size:.68rem;text-align:left">
     <span style="display:inline-block;width:7px;height:7px;border-radius:2px;
-                 background:{dot};margin-right:5px;vertical-align:middle"></span>
-    {etapa.split('(')[0].strip()}
-  </td>
-  <td style="text-align:right;padding:6px 8px;font-size:.73rem">{int(av):,}</td>
-  <td style="text-align:right;padding:6px 8px;font-size:.73rem">{fmt_num(kg,0)}</td>
-  <td style="text-align:right;padding:6px 8px;font-size:.73rem">{fmt_num(fcr,3)}</td>
-  <td style="text-align:right;padding:6px 8px;font-size:.73rem">{fmt_num(co,0,prefix="$")}</td>
-  <td style="text-align:right;padding:6px 8px;font-size:.73rem">
-    <span class="badge {bdg}">{fmt_num(ck,3,prefix="$")}</span>
-  </td>
-  <td style="text-align:right;padding:6px 8px;font-size:.73rem">{fmt_num(mo,2,suffix="%")}</td>
+                background:{r['dot']};margin-right:4px;vertical-align:middle"></span>
+    {r['rango']}
+</td>
+<td style="text-align:right;padding:4px 6px;font-size:.68rem">{fmt_manager(r['co'], prefix="$")}</td>
+<td style="text-align:right;padding:4px 6px;font-size:.68rem">{fmt_manager(r['av'])}</td>
+<td style="text-align:right;padding:4px 6px;font-size:.68rem">{fmt_manager(r['kg'], suffix=" kg")}</td>
+<td style="text-align:right;padding:4px 6px;font-size:.68rem">
+    <span class="badge {r['bdg']}">{fmt_num(r['ck'],3,prefix="$")}</span>
+</td>
+<td style="text-align:right;padding:4px 6px;font-size:.68rem">{fmt_num(r['fcr'],3)}</td>
+<td style="text-align:right;padding:4px 6px;font-size:.68rem">{fmt_num(r['mo'],2,suffix="%")}</td>
 </tr>"""
+
         md(f"""
 <div class="card" style="padding:0;overflow:auto;height:240px">
 <table style="width:100%;border-collapse:collapse">
 <thead style="position:sticky;top:0;background:#F8FAFC;z-index:1">
 <tr style="border-bottom:1px solid {BORDER}">
-  <th style="text-align:left;padding:6px 8px;color:{MUTED};font-size:.63rem;text-transform:uppercase;letter-spacing:.3px">Etapa</th>
-  <th style="text-align:right;padding:6px 8px;color:{MUTED};font-size:.63rem;text-transform:uppercase">Aves</th>
-  <th style="text-align:right;padding:6px 8px;color:{MUTED};font-size:.63rem;text-transform:uppercase">Kg</th>
-  <th style="text-align:right;padding:6px 8px;color:{MUTED};font-size:.63rem;text-transform:uppercase">FCR</th>
-  <th style="text-align:right;padding:6px 8px;color:{MUTED};font-size:.63rem;text-transform:uppercase">Costo</th>
-  <th style="text-align:right;padding:6px 8px;color:{MUTED};font-size:.63rem;text-transform:uppercase">$/kg</th>
-  <th style="text-align:right;padding:6px 8px;color:{MUTED};font-size:.63rem;text-transform:uppercase">M%</th>
-</tr></thead><tbody>{tbody}</tbody>
+<th style="text-align:left;padding:4px 6px;color:{MUTED};font-size:.58rem;text-transform:uppercase;letter-spacing:.2px">Edad</th>
+<th style="text-align:right;padding:4px 6px;color:{MUTED};font-size:.58rem;text-transform:uppercase">$Ali</th>
+<th style="text-align:right;padding:4px 6px;color:{MUTED};font-size:.58rem;text-transform:uppercase">Aves</th>
+<th style="text-align:right;padding:4px 6px;color:{MUTED};font-size:.58rem;text-transform:uppercase">Kg</th>
+<th style="text-align:right;padding:4px 6px;color:{MUTED};font-size:.58rem;text-transform:uppercase">$UKg</th>
+<th style="text-align:right;padding:4px 6px;color:{MUTED};font-size:.58rem;text-transform:uppercase">Conv</th>
+<th style="text-align:right;padding:4px 6px;color:{MUTED};font-size:.58rem;text-transform:uppercase">M%</th>
+</tr>
+</thead>
+<tbody>{tbody}</tbody>
 </table></div>""")
 
-    # ── SEC 02 · Top 5 Granjas - Problemas de Conversión ────────
     # ── SEC 02 · Top 10 Granjas con mayor sobrecosto vs ideal ────────
     md(f"""
 <div class="sec-header">
@@ -311,7 +380,6 @@ with left:
   </div>
 </div>""")
 
-    # ── Filtrar por etapa seleccionada desde la Sec 01 ─────
     SF_02 = SF.copy()
     if etapas_sel:
         SF_02 = SF_02[SF_02["Etapa"].isin(etapas_sel)]
@@ -319,284 +387,293 @@ with left:
     if SF_02.empty:
         st.info("Sin lotes para los filtros actuales.")
     else:
-        # Gap por galpón/lote usando snapshot actual
         gaps_galpon_df = calcular_fcr_gaps_galpones(SF_02, IDEALES)
 
         if gaps_galpon_df.empty:
-            combos = SF_02.groupby(["ZonaNombre", "TipoStd", "Quintil"]).size().reset_index()
-            combos_str = " | ".join([
-                f"{r['ZonaNombre']}·{r['TipoStd']}·{r['Quintil']}"
-                for _, r in combos.iterrows()
-            ])
-            st.warning(
-                f"No se encontraron galpones con gap vs ideal.\n\n"
-                f"**Combinaciones buscadas:** {combos_str}\n\n"
-                f"Verifica que `{BENCH_FILE}` tenga curvas para estas combinaciones."
-            )
+            st.info("No hay galpones para analizar con los filtros actuales.")
         else:
             gaps_galpon_df = gaps_galpon_df.copy()
 
-            # Compatibilidad con tu versión restaurada
-            if "CostoReal" not in gaps_galpon_df.columns:
-                gaps_galpon_df["CostoReal"] = pd.to_numeric(
-                    gaps_galpon_df.get("CostoAcum", np.nan), errors="coerce"
+            if "Granja" not in gaps_galpon_df.columns:
+                gaps_galpon_df["Granja"] = gaps_galpon_df.get("NombreGranja", "—")
+
+            if "NombreGranja" not in gaps_galpon_df.columns:
+                gaps_galpon_df["NombreGranja"] = gaps_galpon_df["Granja"]
+
+            if "Galpon" not in gaps_galpon_df.columns:
+                gaps_galpon_df["Galpon"] = np.nan
+
+            num_cols = [
+                "Edad", "AvesVivas", "KgLive", "PesoIdeal", "KgLiveIdeal",
+                "PrecioKgReal", "AlimIdealAcum", "FCR_real", "FCR_ideal",
+                "Gap_FCR", "CostoReal", "CostoIdeal", "GapCosto", "GapCostoKg", "Galpon"
+            ]
+            for c in num_cols:
+                if c in gaps_galpon_df.columns:
+                    gaps_galpon_df[c] = pd.to_numeric(gaps_galpon_df[c], errors="coerce")
+
+            if gaps_galpon_df["CostoIdeal"].notna().sum() == 0:
+                combos = SF_02.groupby(["ZonaNombre", "TipoStd", "Quintil"]).size().reset_index()
+                combos_str = " | ".join([
+                    f"{r['ZonaNombre']}·{r['TipoStd']}·{r['Quintil']}"
+                    for _, r in combos.iterrows()
+                ])
+                st.warning(
+                    f"No se pudo calcular el ideal comparable para los galpones filtrados.\n\n"
+                    f"**Combinaciones buscadas:** {combos_str}\n\n"
+                    f"Verifica que `{BENCH_FILE}` tenga curvas para estas combinaciones."
                 )
-
-            # ── Calcular costo ideal por fila desde IDEALES ─────
-            def _buscar_costo_ideal(row):
-                sub = IDEALES[
-                    (IDEALES["Zona_Nombre"] == row["ZonaNombre"]) &
-                    (IDEALES["TipoGranja"]  == row["TipoStd"]) &
-                    (IDEALES["Quintil"]     == row["Quintil"])
-                ].copy()
-
-                if sub.empty or "costo_alimento_acumulado" not in sub.columns:
-                    return np.nan
-
-                sub["Edad"] = pd.to_numeric(sub["Edad"], errors="coerce")
-                sub["costo_alimento_acumulado"] = pd.to_numeric(
-                    sub["costo_alimento_acumulado"], errors="coerce"
-                )
-                sub = sub.dropna(subset=["Edad", "costo_alimento_acumulado"])
-
-                if sub.empty:
-                    return np.nan
-
-                edad_lote = pd.to_numeric(row["Edad"], errors="coerce")
-                if pd.isna(edad_lote):
-                    return np.nan
-
-                exact = sub[sub["Edad"] == edad_lote]
-                if not exact.empty:
-                    return float(exact["costo_alimento_acumulado"].iloc[0])
-
-                idx_min = (sub["Edad"] - float(edad_lote)).abs().idxmin()
-                return float(sub.loc[idx_min, "costo_alimento_acumulado"])
-
-            gaps_galpon_df["CostoIdeal"] = gaps_galpon_df.apply(_buscar_costo_ideal, axis=1)
-            gaps_galpon_df["GapCosto"] = gaps_galpon_df["CostoReal"] - gaps_galpon_df["CostoIdeal"]
-
-            # Solo problemas reales en dólares
-            con_prob = gaps_galpon_df[gaps_galpon_df["GapCosto"] > 0].copy()
-
-            if con_prob.empty:
-                st.info("Ninguna granja presenta sobrecosto positivo vs ideal con los filtros actuales.")
             else:
-                md('<div class="hint-text">Sobrecosto acumulado por granja respecto al ideal (Top 10 peores)</div>')
+                con_prob = gaps_galpon_df[gaps_galpon_df["GapCosto"] > 0].copy()
 
-                # ── Resumen por granja ─────
-                df_granjas = (
-                    con_prob.groupby(["Granja", "NombreGranja"], as_index=False)
-                    .agg(
-                        NumGalpones    = ("Galpon", "nunique"),
-                        CostoRealTotal = ("CostoReal", "sum"),
-                        CostoIdealTotal= ("CostoIdeal", "sum"),
-                        GapCostoTotal  = ("GapCosto", "sum"),
-                        FCR_real       = ("FCR_real", "mean"),
-                        FCR_ideal      = ("FCR_ideal", "mean"),
-                        Gap_FCR_medio  = ("Gap_FCR", "mean"),
-                    )
-                )
-
-                if df_granjas.empty:
-                    st.info("No se pudo consolidar el sobrecosto por granja.")
+                if con_prob.empty:
+                    st.info("Ninguna granja presenta sobrecosto positivo vs ideal con los filtros actuales.")
                 else:
-                    # Top 10 peores por sobrecosto acumulado
-                    df_plot = df_granjas.sort_values(
-                        ["GapCostoTotal", "Gap_FCR_medio"],
-                        ascending=[False, False]
-                    ).head(10).copy()
+                    md('<div class="hint-text">Sobrecosto acumulado por granja respecto al ideal comparable (Top 10 peores)</div>')
 
-                    df_plot["NombreMostrar"] = df_plot["NombreGranja"].fillna(df_plot["Granja"])
-
-                    # ── Semaforización por terciles dentro del Top 10 ─────
-                    q_bajo  = df_plot["GapCostoTotal"].quantile(0.33)
-                    q_medio = df_plot["GapCostoTotal"].quantile(0.66)
-
-                    def clasificar_semaforo(v):
-                        if pd.isna(v):
-                            return "BAJO"
-                        elif v >= q_medio:
-                            return "CRITICO"
-                        elif v >= q_bajo:
-                            return "MEDIO"
-                        else:
-                            return "BAJO"
-
-                    df_plot["Semaforo"] = df_plot["GapCostoTotal"].apply(clasificar_semaforo)
-
-                    color_map = {
-                        "CRITICO": "#dc2626",   # rojo
-                        "MEDIO":   "#f59e0b",   # ámbar
-                        "BAJO":    "#16a34a",   # verde
-                    }
-
-                    df_plot["ColorBarra"] = df_plot["Semaforo"].map(color_map)
-
-                    # ── Gráfico vertical ─────
-                    fig_g = go.Figure()
-                    fig_g.add_trace(go.Bar(
-                        x=df_plot["NombreMostrar"],
-                        y=df_plot["GapCostoTotal"],
-                        marker=dict(
-                            color=df_plot["ColorBarra"],
-                            line=dict(color="rgba(0,0,0,0.15)", width=0.8)
-                        ),
-                        customdata=df_plot[[
-                            "Granja", "NombreMostrar", "CostoRealTotal", "CostoIdealTotal",
-                            "GapCostoTotal", "NumGalpones", "Gap_FCR_medio", "Semaforo"
-                        ]].values,
-                        hovertemplate=(
-                            "<b>%{customdata[1]}</b><br>"
-                            "Código granja: %{customdata[0]}<br>"
-                            "Sobrecosto acumulado: <b>$%{customdata[4]:,.0f}</b><br>"
-                            "Costo real total: $%{customdata[2]:,.0f}<br>"
-                            "Costo ideal total: $%{customdata[3]:,.0f}<br>"
-                            "Galpones afectados: %{customdata[5]}<br>"
-                            "Gap FCR medio: %{customdata[6]:.4f}<br>"
-                            "Severidad: <b>%{customdata[7]}</b>"
-                            "<extra></extra>"
-                        ),
-                    ))
-
-                    fig_g.update_layout(
-                        template="plotly_white",
-                        paper_bgcolor=CARD,
-                        plot_bgcolor=CARD,
-                        height=390,
-                        margin=dict(l=8, r=8, t=18, b=90),
-                        font=dict(family="DM Sans", size=9, color=CHART_TEXT),
-                        showlegend=False,
-                        xaxis=dict(
-                            title="Granja",
-                            tickangle=-35,
-                            gridcolor=BORDER,
-                            color=CHART_TEXT,
-                            tickfont=dict(color=CHART_TEXT),
-                            title_font=dict(color=CHART_TEXT)
-                        ),
-                        yaxis=dict(
-                            title="Sobrecosto acumulado vs ideal ($)",
-                            gridcolor=BORDER,
-                            color=CHART_TEXT,
-                            tickfont=dict(color=CHART_TEXT),
-                            title_font=dict(color=CHART_TEXT)
-                        ),
+                    df_granjas = (
+                        con_prob.groupby(["Granja", "NombreGranja"], as_index=False)
+                        .agg(
+                            NumGalpones     = ("Galpon", "nunique"),
+                            CostoRealTotal  = ("CostoReal", "sum"),
+                            CostoIdealTotal = ("CostoIdeal", "sum"),
+                            GapCostoTotal   = ("GapCosto", "sum"),
+                            FCR_real        = ("FCR_real", "mean"),
+                            FCR_ideal       = ("FCR_ideal", "mean"),
+                            Gap_FCR_medio   = ("Gap_FCR", "mean"),
+                        )
                     )
 
-                    sel_g = st.plotly_chart(
-                        fig_g,
-                        on_select="rerun",
-                        selection_mode="points",
-                        key="chart_granjas",
-                        config={"displayModeBar": False},
-                        width="stretch",
-                    )
-
-                    puntos_sel = sel_g.selection.get("points", []) if sel_g and sel_g.selection else []
-
-                    granja_activa_codigo = (
-                        puntos_sel[0]["customdata"][0]
-                        if puntos_sel
-                        else df_plot["Granja"].iloc[0]
-                    )
-
-                    fila_act = df_plot[df_plot["Granja"] == granja_activa_codigo]
-                    granja_activa_nombre = (
-                        fila_act["NombreMostrar"].iloc[0]
-                        if not fila_act.empty
-                        else granja_activa_codigo
-                    )
-
-                    if puntos_sel:
-                        md(f'<div class="sel-pill">🏭 {granja_activa_codigo} · <strong>{granja_activa_nombre}</strong></div>')
+                    if df_granjas.empty:
+                        st.info("No se pudo consolidar el sobrecosto por granja.")
                     else:
-                        md(f'<div class="hint-text">Clic en barra para seleccionar granja · Activa: <strong>{granja_activa_nombre}</strong></div>')
+                        df_plot = df_granjas.sort_values(
+                            ["GapCostoTotal", "Gap_FCR_medio"],
+                            ascending=[False, False]
+                        ).head(10).copy()
 
-                    # ── Tabla de galpones/lotes de la granja seleccionada ─────
-                    galpones_granja = (
-                        con_prob[con_prob["Granja"] == granja_activa_codigo]
-                        .copy()
-                        .sort_values(["GapCosto", "Gap_FCR"], ascending=[False, False])
-                    )
+                        df_plot["NombreMostrar"] = df_plot["NombreGranja"].fillna(df_plot["Granja"])
 
-                    if galpones_granja.empty:
-                        st.info(f"Sin datos de galpones para {granja_activa_nombre}.")
-                    else:
-                        tabla_galp = galpones_granja[[
-                            "LoteCompleto", "Galpon", "Edad",
-                            "GapCosto", "FCR_real", "FCR_ideal", "Gap_FCR", "CostoReal", "CostoIdeal"
-                        ]].copy()
+                        q_bajo = df_plot["GapCostoTotal"].quantile(0.33)
+                        q_medio = df_plot["GapCostoTotal"].quantile(0.66)
 
-                        tabla_galp["Código"] = tabla_galp["LoteCompleto"].apply(extract_lote_codigo)
+                        def clasificar_semaforo(v):
+                            if pd.isna(v):
+                                return "BAJO"
+                            elif v >= q_medio:
+                                return "CRITICO"
+                            elif v >= q_bajo:
+                                return "MEDIO"
+                            return "BAJO"
 
-                        # Formato gerencial para mostrar dinero sin decimales
-                        tabla_galp["SobrecostoFmt"] = tabla_galp["GapCosto"].apply(
-                            lambda x: fmt_manager(x, prefix="$") if pd.notna(x) else "—"
+                        df_plot["Semaforo"] = df_plot["GapCostoTotal"].apply(clasificar_semaforo)
+
+                        color_map = {
+                            "CRITICO": "#dc2626",
+                            "MEDIO":   "#f59e0b",
+                            "BAJO":    "#16a34a",
+                        }
+                        df_plot["ColorBarra"] = df_plot["Semaforo"].map(color_map)
+
+                        fig_g = go.Figure()
+                        fig_g.add_trace(go.Bar(
+                            x=df_plot["NombreMostrar"],
+                            y=df_plot["GapCostoTotal"],
+                            marker=dict(
+                                color=df_plot["ColorBarra"],
+                                line=dict(color="rgba(0,0,0,0.15)", width=0.8)
+                            ),
+                            customdata=df_plot[[
+                                "Granja", "NombreMostrar", "CostoRealTotal", "CostoIdealTotal",
+                                "GapCostoTotal", "NumGalpones", "Gap_FCR_medio", "Semaforo"
+                            ]].values,
+                            hovertemplate=(
+                                "<b>%{customdata[1]}</b><br>"
+                                "Código granja: %{customdata[0]}<br>"
+                                "Sobrecosto acumulado: <b>$%{customdata[4]:,.0f}</b><br>"
+                                "Costo real total: $%{customdata[2]:,.0f}<br>"
+                                "Costo ideal comparable: $%{customdata[3]:,.0f}<br>"
+                                "Galpones afectados: %{customdata[5]}<br>"
+                                "Gap FCR medio: %{customdata[6]:.4f}<br>"
+                                "Severidad: <b>%{customdata[7]}</b>"
+                                "<extra></extra>"
+                            ),
+                        ))
+
+                        fig_g.update_layout(
+                            template="plotly_white",
+                            paper_bgcolor=CARD,
+                            plot_bgcolor=CARD,
+                            height=390,
+                            margin=dict(l=8, r=8, t=18, b=90),
+                            font=dict(family="DM Sans", size=9, color=CHART_TEXT),
+                            showlegend=False,
+                            xaxis=dict(
+                                title="Granja",
+                                tickangle=-35,
+                                gridcolor=BORDER,
+                                color=CHART_TEXT,
+                                tickfont=dict(color=CHART_TEXT),
+                                title_font=dict(color=CHART_TEXT)
+                            ),
+                            yaxis=dict(
+                                title="Sobrecosto acumulado vs ideal ($)",
+                                gridcolor=BORDER,
+                                color=CHART_TEXT,
+                                tickfont=dict(color=CHART_TEXT),
+                                title_font=dict(color=CHART_TEXT)
+                            ),
                         )
-                        tabla_galp["CostoRealFmt"] = tabla_galp["CostoReal"].apply(
-                            lambda x: fmt_manager(x, prefix="$") if pd.notna(x) else "—"
-                        )
-                        tabla_galp["CostoIdealFmt"] = tabla_galp["CostoIdeal"].apply(
-                            lambda x: fmt_manager(x, prefix="$") if pd.notna(x) else "—"
-                        )
 
-                        # Ordenar por mayor sobrecosto primero
-                        tabla_galp = tabla_galp.sort_values(
-                            ["GapCosto", "Gap_FCR", "Edad"],
-                            ascending=[False, False, False]
-                        ).reset_index(drop=True)
-
-                        md(f'<div class="hint-text">{len(tabla_galp)} galpón(es) en problema en <strong>{granja_activa_nombre}</strong> · mayor sobrecosto primero</div>')
-
-                        tabla_galp_show = tabla_galp[[
-                            "Código", "Galpon", "Edad", "SobrecostoFmt",
-                            "CostoRealFmt", "CostoIdealFmt", "FCR_real", "FCR_ideal", "Gap_FCR"
-                        ]].copy()
-
-                        sel_t = st.dataframe(
-                            tabla_galp_show,
+                        sel_g = st.plotly_chart(
+                            fig_g,
                             on_select="rerun",
-                            selection_mode="single-row",
-                            key="df_lotes_sec02",
-                            hide_index=True,
+                            selection_mode="points",
+                            key="chart_granjas",
+                            config={"displayModeBar": False},
                             width="stretch",
-                            height=min(320, 35 * (len(tabla_galp_show) + 1)),
-                            column_config={
-                                "Código":         st.column_config.TextColumn("🔖 Lote"),
-                                "Galpon":         st.column_config.NumberColumn("Galpón", format="%d", width="small"),
-                                "Edad":           st.column_config.NumberColumn("Días", format="%d d", width="small"),
-                                "SobrecostoFmt":  st.column_config.TextColumn("Real vs Ideal"),
-                                "CostoRealFmt":   st.column_config.TextColumn("Costo real"),
-                                "CostoIdealFmt":  st.column_config.TextColumn("Costo ideal"),
-                                "FCR_real":       st.column_config.NumberColumn("FCR Real", format="%.4f", width="small"),
-                                "FCR_ideal":      st.column_config.NumberColumn("FCR Ideal", format="%.4f", width="small"),
-                                "Gap_FCR":        st.column_config.NumberColumn("Gap FCR ↑", format="+%.4f", width="small"),
-                            },
                         )
 
-                        rows_sel = sel_t.selection.get("rows", [])
-                        idx = rows_sel[0] if rows_sel else None
+                        puntos_sel = sel_g.selection.get("points", []) if sel_g and sel_g.selection else []
 
-                        if idx is not None and 0 <= int(idx) < len(tabla_galp):
-                            nuevo_lote = tabla_galp.iloc[int(idx)]["LoteCompleto"]
-                            if st.session_state.get("lote_sel_sec03") != nuevo_lote:
-                                st.session_state["lote_sel_sec03"] = nuevo_lote
-                                st.rerun()
-                        elif idx is not None:
-                            st.info("La lista cambió por los filtros. Selecciona un galpón nuevamente 👇")
+                        granja_activa_codigo = (
+                            puntos_sel[0]["customdata"][0]
+                            if puntos_sel
+                            else df_plot["Granja"].iloc[0]
+                        )
 
-       # ── SEC 03 · Lote Seleccionado: IDEAL vs REAL ─────────────
+                        fila_act = df_plot[df_plot["Granja"] == granja_activa_codigo]
+                        granja_activa_nombre = (
+                            fila_act["NombreMostrar"].iloc[0]
+                            if not fila_act.empty
+                            else granja_activa_codigo
+                        )
+
+                        if puntos_sel:
+                            md(f'<div class="sel-pill">🏭 {granja_activa_codigo} · <strong>{granja_activa_nombre}</strong></div>')
+                        else:
+                            md(f'<div class="hint-text">Clic en barra para seleccionar granja · Activa: <strong>{granja_activa_nombre}</strong></div>')
+
+                        galpones_granja = (
+                            con_prob[con_prob["Granja"] == granja_activa_codigo]
+                            .copy()
+                            .sort_values(["GapCosto", "Gap_FCR"], ascending=[False, False])
+                        )
+
+                        if galpones_granja.empty:
+                            st.info(f"Sin datos de galpones para {granja_activa_nombre}.")
+                        else:
+                            tabla_galp = galpones_granja[[
+                                "LoteCompleto", "Galpon", "Edad",
+                                "GapCosto", "FCR_real", "FCR_ideal", "Gap_FCR",
+                                "CostoReal", "CostoIdeal", "AlimIdealAcum", "PrecioKgReal"
+                            ]].copy()
+
+                            tabla_galp["Código"] = tabla_galp["LoteCompleto"].apply(extract_lote_codigo)
+                            tabla_galp["Galpon"] = pd.to_numeric(tabla_galp["Galpon"], errors="coerce")
+
+                            tabla_galp["SobrecostoFmt"] = tabla_galp["GapCosto"].apply(
+                                lambda x: fmt_manager(x, prefix="$") if pd.notna(x) else "—"
+                            )
+                            tabla_galp["CostoRealFmt"] = tabla_galp["CostoReal"].apply(
+                                lambda x: fmt_manager(x, prefix="$") if pd.notna(x) else "—"
+                            )
+                            tabla_galp["CostoIdealFmt"] = tabla_galp["CostoIdeal"].apply(
+                                lambda x: fmt_manager(x, prefix="$") if pd.notna(x) else "—"
+                            )
+
+                            tabla_galp = tabla_galp.sort_values(
+                                ["GapCosto", "Gap_FCR", "Edad"],
+                                ascending=[False, False, False]
+                            ).reset_index(drop=True)
+
+                            md(f'<div class="hint-text">{len(tabla_galp)} galpón(es) en problema en <strong>{granja_activa_nombre}</strong> · mayor sobrecosto primero</div>')
+
+                            tabla_galp_show = tabla_galp[[
+                                "Código", "Galpon", "Edad", "SobrecostoFmt",
+                                "CostoRealFmt", "CostoIdealFmt", "FCR_real", "FCR_ideal", "Gap_FCR"
+                            ]].copy()
+
+                            sel_t = st.dataframe(
+                                tabla_galp_show,
+                                on_select="rerun",
+                                selection_mode="single-row",
+                                key="df_lotes_sec02",
+                                hide_index=True,
+                                width="stretch",
+                                height=min(320, 35 * (len(tabla_galp_show) + 1)),
+                                column_config={
+                                    "Código":         st.column_config.TextColumn("🔖 Lote"),
+                                    "Galpon":         st.column_config.NumberColumn("Galpón", format="%d", width="small"),
+                                    "Edad":           st.column_config.NumberColumn("Días", format="%d d", width="small"),
+                                    "SobrecostoFmt":  st.column_config.TextColumn("Real vs Ideal"),
+                                    "CostoRealFmt":   st.column_config.TextColumn("Costo real"),
+                                    "CostoIdealFmt":  st.column_config.TextColumn("Costo ideal"),
+                                    "FCR_real":       st.column_config.NumberColumn("Con Real", format="%.4f", width="small"),
+                                    "FCR_ideal":      st.column_config.NumberColumn("Con Ideal", format="%.4f", width="small"),
+                                    "Gap_FCR":        st.column_config.NumberColumn("Gap Con ↑", format="+%.4f", width="small"),
+                                },
+                            )
+
+                            rows_sel = sel_t.selection.get("rows", [])
+                            idx = rows_sel[0] if rows_sel else None
+
+                            if idx is not None and 0 <= int(idx) < len(tabla_galp):
+                                nuevo_lote = tabla_galp.iloc[int(idx)]["LoteCompleto"]
+                                if st.session_state.get("lote_sel_sec03") != nuevo_lote:
+                                    st.session_state["lote_sel_sec03"] = nuevo_lote
+                                    st.rerun()
+                            elif idx is not None:
+                                st.info("La lista cambió por los filtros. Selecciona un galpón nuevamente 👇")
+
+    # ── SEC 03 · Lote Seleccionado: IDEAL vs REAL ─────────────
+    # ── SEC 03 · Lote Seleccionado: IDEAL vs REAL ─────────────
     md(f"""
 <div class="sec-header">
-  <span class="sec-num">03</span>
-  <div>
+<span class="sec-num">03</span>
+<div>
     <div class="sec-title">Lote Seleccionado: Crecimiento IDEAL vs REAL</div>
     <div class="sec-sub">Análisis detallado · selecciona un galpón en la tabla de arriba</div>
-  </div>
+</div>
 </div>""")
 
-    lotes_disp = SF["LoteCompleto"].unique().tolist()
+    # ── Helpers visuales sec 03 ───────────────────────────────
+    def fmt_signed_short(n, prefix="", suffix=""):
+        if pd.isna(n):
+            return "—"
+        x = float(n)
+        base = fmt_manager(abs(x), prefix=prefix, suffix=suffix)
+        if x > 0:
+            return f"+{base}"
+        elif x < 0:
+            return f"-{base}"
+        return base
+
+    def render_kpi_small(value_html, label, accent=False):
+        cls = "kpi-chip accent" if accent else "kpi-chip"
+        md(f'''
+<div class="{cls}" style="
+    padding:10px 10px;
+    min-height:74px;
+    display:flex;
+    flex-direction:column;
+    justify-content:center;
+">
+    <div class="kv" style="
+        font-size:1rem;
+        line-height:1.05;
+        white-space:normal;
+        word-break:break-word;
+        overflow-wrap:anywhere;
+    ">{value_html}</div>
+    <div class="kl" style="
+        font-size:.66rem;
+        line-height:1.1;
+        margin-top:4px;
+    ">{label}</div>
+</div>''')
+
+    lotes_disp = SF["LoteCompleto"].dropna().unique().tolist()
     if (
         "lote_sel_sec03" not in st.session_state
         or st.session_state["lote_sel_sec03"] not in lotes_disp
@@ -608,114 +685,59 @@ with left:
         st.info("Selecciona un galpón en la tabla de arriba.")
         st.stop()
 
-    # ── Datos del lote ────────────────────────────────────────
-    il   = SF[SF["LoteCompleto"] == lote_sel].iloc[0]
-    hist = DF[DF["LoteCompleto"] == lote_sel].sort_values("Edad").copy()
+    il = SF[SF["LoteCompleto"] == lote_sel].iloc[0]
+    hist = DF_FILTRADO[DF_FILTRADO["LoteCompleto"] == lote_sel].sort_values("Edad").copy()
+
     if hist.empty:
         st.warning("No hay historial para este lote.")
         st.stop()
 
-    hist_ord  = hist.sort_values("Edad").copy()
+    hist_cmp = hist.copy().reset_index(drop=True)
+    hist_ord = hist_cmp.sort_values("Edad").copy()
     snap_last = hist_ord.iloc[-1]
-    snap_prev = hist_ord.iloc[-2] if len(hist_ord) >= 2 else None
 
-    zona_v   = il["ZonaNombre"]
-    tipo_v   = il["TipoStd"]
-    quint_v  = il["Quintil"]
+    zona_v = il["ZonaNombre"]
+    tipo_v = il["TipoStd"]
+    quint_v = il["Quintil"]
     edad_act = int(il["Edad"])
     nombre_g = snap_last.get("NombreGranja", il.get("GranjaID", "—"))
     galpon_v = snap_last.get("Galpon", "—")
 
-    # ── Base comparativa día a día ────────────────────────────
-    hist_cmp = hist.copy().sort_values("Edad").reset_index(drop=True)
-
+    # ── Normalización de columnas del histórico enriquecido ──
     for c in [
         "Edad", "PesoFinal", "AvesVivas", "MortPct", "CostoAcum", "CostoKg_Cum",
         "AlimAcumKg", "_alim_dia", "CostoAlimentoDia", "KgLive",
-        "PrecioKg", "precio_kg", "Precio_Kg", "conversio alimenticia", "FCR_Cum"
+        "PrecioKg", "PrecioKgRealDia", "FCR_Cum",
+        "FCR_ideal", "PesoIdeal_comp", "KgLiveIdeal_comp",
+        "AlimIdealAcum_comp", "AlimIdealDia_comp",
+        "CostoIdealDia_comp", "CostoIdealComp", "GapCostoComp"
     ]:
         if c in hist_cmp.columns:
             hist_cmp[c] = pd.to_numeric(hist_cmp[c], errors="coerce")
 
-    # FCR real del lote
-    fcr_col_hist = "conversio alimenticia" if "conversio alimenticia" in hist_cmp.columns else "FCR_Cum"
+    fcr_col_hist = "FCR_Cum"
 
-    # Precio/kg real del galpón por día
-    precio_col = None
-    for c in ["PrecioKg", "precio_kg", "Precio_Kg"]:
-        if c in hist_cmp.columns:
-            precio_col = c
-            break
+    # Alias amigables
+    hist_cmp["PesoIdeal"] = hist_cmp.get("PesoIdeal_comp", np.nan)
+    hist_cmp["KgLiveIdeal_calc"] = hist_cmp.get("KgLiveIdeal_comp", np.nan)
+    hist_cmp["AlimIdealAcum_calc"] = hist_cmp.get("AlimIdealAcum_comp", np.nan)
+    hist_cmp["AlimIdealDia_calc"] = hist_cmp.get("AlimIdealDia_comp", np.nan)
+    hist_cmp["CostoIdealDia_calc"] = hist_cmp.get("CostoIdealDia_comp", np.nan)
+    hist_cmp["CostoIdealAcum_calc"] = hist_cmp.get("CostoIdealComp", np.nan)
+    hist_cmp["DifCosto_calc"] = hist_cmp.get("GapCostoComp", np.nan)
 
-    if precio_col:
-        hist_cmp["PrecioKgRealDia"] = pd.to_numeric(hist_cmp[precio_col], errors="coerce")
-    else:
-        hist_cmp["PrecioKgRealDia"] = np.nan
+    tiene_ideal = hist_cmp["CostoIdealAcum_calc"].notna().any()
 
-    if "CostoAlimentoDia" in hist_cmp.columns and "_alim_dia" in hist_cmp.columns:
-        hist_cmp["PrecioKgRealDia"] = hist_cmp["PrecioKgRealDia"].fillna(
-            hist_cmp["CostoAlimentoDia"] / hist_cmp["_alim_dia"].replace(0, np.nan)
-        )
-
-    hist_cmp["PrecioKgRealDia"] = hist_cmp["PrecioKgRealDia"].fillna(
-        hist_cmp["CostoAcum"] / hist_cmp["AlimAcumKg"].replace(0, np.nan)
-    )
-
-    hist_cmp["PrecioKgRealDia"] = hist_cmp["PrecioKgRealDia"].ffill().bfill()
-
-    # ── Curva ideal del combo ─────────────────────────────────
-    ideal_avg = get_curva_ideal_promedio(
-        zona_v, tipo_v, quint_v, IDEALES,
-        edad_max=edad_act
-    )
-    tiene_ideal = not ideal_avg.empty
-
-    # Merge ideal → real para recalcular costo comparable
-    if tiene_ideal:
-        cols_merge = ["Edad", "FCR_ideal"]
-        if "Peso" in ideal_avg.columns:
-            cols_merge.append("Peso")
-
-        hist_cmp = hist_cmp.merge(
-            ideal_avg[cols_merge].rename(columns={"Peso": "PesoIdeal"}),
-            on="Edad", how="left"
-        )
-
-        # Ideal comparable usando la escala real del galpón:
-        # alimento ideal acumulado = FCR ideal * Kg reales producidos
-        hist_cmp["AlimIdealAcum_calc"] = hist_cmp["FCR_ideal"] * hist_cmp["KgLive"]
-
-        hist_cmp["AlimIdealDia_calc"] = hist_cmp["AlimIdealAcum_calc"].diff()
-        if not hist_cmp.empty:
-            hist_cmp.loc[0, "AlimIdealDia_calc"] = hist_cmp.loc[0, "AlimIdealAcum_calc"]
-
-        hist_cmp["AlimIdealDia_calc"] = hist_cmp["AlimIdealDia_calc"].clip(lower=0)
-
-        # costo ideal diario comparable = alimento ideal del día * precio real del galpón ese día
-        hist_cmp["CostoIdealDia_calc"] = hist_cmp["AlimIdealDia_calc"] * hist_cmp["PrecioKgRealDia"]
-        hist_cmp["CostoIdealAcum_calc"] = hist_cmp["CostoIdealDia_calc"].fillna(0).cumsum()
-
-        hist_cmp["DifCosto_calc"] = hist_cmp["CostoAcum"] - hist_cmp["CostoIdealAcum_calc"]
-    else:
-        hist_cmp["FCR_ideal"]            = np.nan
-        hist_cmp["PesoIdeal"]            = np.nan
-        hist_cmp["AlimIdealAcum_calc"]   = np.nan
-        hist_cmp["AlimIdealDia_calc"]    = np.nan
-        hist_cmp["CostoIdealDia_calc"]   = np.nan
-        hist_cmp["CostoIdealAcum_calc"]  = np.nan
-        hist_cmp["DifCosto_calc"]        = np.nan
-
-    # ── Último punto para KPIs ────────────────────────────────
     last_cmp = hist_cmp.iloc[-1]
 
-    aves_v            = last_cmp.get("AvesVivas", np.nan)
-    mort_pct          = last_cmp.get("MortPct", np.nan)
-    costo_acum        = last_cmp.get("CostoAcum", np.nan)
-    costo_kg          = last_cmp.get("CostoKg_Cum", np.nan)
-    alim_acum         = last_cmp.get("AlimAcumKg", np.nan)
-    kg_live_lote      = last_cmp.get("KgLive", np.nan)
-    precio_kg_real    = last_cmp.get("PrecioKgRealDia", np.nan)
-    alim_ideal_acum   = last_cmp.get("AlimIdealAcum_calc", np.nan)
+    aves_v = last_cmp.get("AvesVivas", np.nan)
+    mort_pct = last_cmp.get("MortPct", np.nan)
+    costo_acum = last_cmp.get("CostoAcum", np.nan)
+    alim_acum = last_cmp.get("AlimAcumKg", np.nan)
+    kg_live_lote = last_cmp.get("KgLive", np.nan)
+    precio_kg_real = last_cmp.get("PrecioKgRealDia", np.nan)
+    alim_ideal_acum = last_cmp.get("AlimIdealAcum_calc", np.nan)
+    kg_live_ideal_calc = last_cmp.get("KgLiveIdeal_calc", np.nan)
 
     alim_dia = last_cmp.get("_alim_dia", np.nan)
     if (pd.isna(alim_dia) or alim_dia == 0) and len(hist_cmp) >= 2:
@@ -723,11 +745,11 @@ with left:
         if pd.notna(alim_acum) and pd.notna(prev_alim):
             alim_dia = alim_acum - prev_alim
 
-    fcr_real_ult   = float(last_cmp.get(fcr_col_hist, np.nan)) if pd.notna(last_cmp.get(fcr_col_hist, np.nan)) else np.nan
-    fcr_ideal_ult  = float(last_cmp.get("FCR_ideal", np.nan)) if pd.notna(last_cmp.get("FCR_ideal", np.nan)) else np.nan
+    fcr_real_ult = float(last_cmp.get(fcr_col_hist, np.nan)) if pd.notna(last_cmp.get(fcr_col_hist, np.nan)) else np.nan
+    fcr_ideal_ult = float(last_cmp.get("FCR_ideal", np.nan)) if pd.notna(last_cmp.get("FCR_ideal", np.nan)) else np.nan
     costo_ideal_ult = float(last_cmp.get("CostoIdealAcum_calc", np.nan)) if pd.notna(last_cmp.get("CostoIdealAcum_calc", np.nan)) else np.nan
 
-    gap_fcr   = fcr_real_ult - fcr_ideal_ult if pd.notna(fcr_real_ult) and pd.notna(fcr_ideal_ult) else np.nan
+    gap_fcr = fcr_real_ult - fcr_ideal_ult if pd.notna(fcr_real_ult) and pd.notna(fcr_ideal_ult) else np.nan
     gap_costo = costo_acum - costo_ideal_ult if pd.notna(costo_acum) and pd.notna(costo_ideal_ult) else np.nan
     gap_costo_kg = (
         gap_costo / kg_live_lote
@@ -735,95 +757,93 @@ with left:
         else np.nan
     )
 
+    edad_max_lote = pd.to_numeric(hist_cmp["Edad"], errors="coerce").max()
+    dtick_x = 1 if pd.notna(edad_max_lote) and edad_max_lote <= 10 else 7
+
     # ── TARJETAS DE IDENTIDAD ─────────────────────────────────
     md(f'''<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;">
-  <div class="sel-pill-neutral">🏭 <strong>{nombre_g}</strong></div>
-  <div class="sel-pill-neutral">🔖 {extract_lote_codigo(lote_sel)}</div>
-  <div class="sel-pill-neutral">🏠 Galpón <strong>{galpon_v}</strong></div>
-  <div class="sel-pill-neutral">📍 {zona_v} · {tipo_v} · {quint_v}</div>
+<div class="sel-pill-neutral">🏭 <strong>{nombre_g}</strong></div>
+<div class="sel-pill-neutral">🔖 {extract_lote_codigo(lote_sel)}</div>
+<div class="sel-pill-neutral">🏠 Galpón <strong>{galpon_v}</strong></div>
+<div class="sel-pill-neutral">📍 {zona_v} · {tipo_v} · {quint_v}</div>
 </div>''')
 
     # ── TARJETAS GERENCIALES ──────────────────────────────────
-    # Fila 1
     c1, c2, c3, c4, c5, c6 = st.columns(6)
 
     with c1:
-        md(f'<div class="kpi-chip"><div class="kv">{edad_act} d</div><div class="kl">Edad actual</div></div>')
+        render_kpi_small(f"{edad_act} d", "Edad actual")
 
     with c2:
-        md(f'<div class="kpi-chip"><div class="kv">{fmt_manager(kg_live_lote, suffix=" kg")}</div><div class="kl">Kg live</div></div>')
+        render_kpi_small(fmt_manager(kg_live_lote, suffix=" kg"), "Kg vivo real")
 
     with c3:
-        md(f'<div class="kpi-chip"><div class="kv">{fmt_num(precio_kg_real,3,prefix="$",suffix="/kg")}</div><div class="kl">Precio kg real</div></div>')
+        render_kpi_small(fmt_num(precio_kg_real, 3, prefix="$", suffix="/kg"), "$ kg real")
 
     with c4:
-        md(f'<div class="kpi-chip accent"><div class="kv">{fmt_manager(costo_acum, prefix="$")}</div><div class="kl">Costo real acum</div></div>')
+        render_kpi_small(fmt_manager(costo_acum, prefix="$"), "$ Real Acum", accent=True)
 
     with c5:
-        md(f'<div class="kpi-chip"><div class="kv">{fmt_manager(costo_ideal_ult, prefix="$")}</div><div class="kl">Costo ideal comparable</div></div>')
+        render_kpi_small(fmt_manager(costo_ideal_ult, prefix="$"), "$ Ideal Com")
 
     with c6:
         diff_badge = "red" if pd.notna(gap_costo) and gap_costo > 0 else "green"
-        if pd.notna(gap_costo):
-            base_diff = fmt_manager(abs(gap_costo), prefix="$")
-            diff_txt = f"+{base_diff}" if gap_costo > 0 else f"-{base_diff}" if gap_costo < 0 else base_diff
-        else:
-            diff_txt = "—"
-        md(f'''<div class="kpi-chip accent">
-  <div class="kv"><span class="badge {diff_badge}">{diff_txt}</span></div>
-  <div class="kl">Sobrecosto vs ideal</div>
-</div>''')
+        diff_txt = fmt_signed_short(gap_costo, prefix="$")
+        render_kpi_small(f'<span class="badge {diff_badge}">{diff_txt}</span>', "Sobrecosto vs ideal", accent=True)
 
-    # Fila 2
     c7, c8, c9, c10, c11, c12 = st.columns(6)
 
     with c7:
-        md(f'<div class="kpi-chip"><div class="kv">{fmt_num(fcr_real_ult,4)}</div><div class="kl">FCR Real</div></div>')
+        render_kpi_small(fmt_num(fcr_real_ult, 4), "Conv Real")
 
     with c8:
-        md(f'<div class="kpi-chip"><div class="kv">{fmt_num(fcr_ideal_ult,4)}</div><div class="kl">FCR Ideal</div></div>')
+        render_kpi_small(fmt_num(fcr_ideal_ult, 4), "Conv Ideal")
 
     with c9:
         gap_badge = "red" if pd.notna(gap_fcr) and gap_fcr > 0 else "green"
-        gap_txt = f"+{gap_fcr:.4f}" if pd.notna(gap_fcr) and gap_fcr > 0 else (fmt_num(gap_fcr, 4) if pd.notna(gap_fcr) else "—")
-        md(f'''<div class="kpi-chip">
-  <div class="kv"><span class="badge {gap_badge}">{gap_txt}</span></div>
-  <div class="kl">Gap FCR</div>
-</div>''')
+        gap_txt = fmt_signed_short(gap_fcr)
+        render_kpi_small(f'<span class="badge {gap_badge}">{gap_txt}</span>', "Gap Conv")
 
     with c10:
-        md(f'<div class="kpi-chip"><div class="kv">{fmt_manager(alim_ideal_acum, suffix=" kg")}</div><div class="kl">Alimento ideal estimado</div></div>')
+        render_kpi_small(fmt_manager(alim_ideal_acum, suffix=" kg"), "Alim ideal")
 
     with c11:
-        md(f'<div class="kpi-chip"><div class="kv">{fmt_num(gap_costo_kg,4,prefix="$")}</div><div class="kl">Gap $/kg</div></div>')
+        render_kpi_small(fmt_num(gap_costo_kg, 4, prefix="$"), "Gap $/kg")
 
     with c12:
-        md(f'<div class="kpi-chip"><div class="kv">{fmt_num(mort_pct,2,suffix="%")}</div><div class="kl">Mortalidad</div></div>')
+        render_kpi_small(fmt_num(mort_pct, 2, suffix="%"), "Mortalidad")
 
     # ── GRÁFICO CRECIMIENTO REAL vs IDEAL ─────────────────────
     hist_v = hist_cmp[hist_cmp["PesoFinal"].notna() & (hist_cmp["PesoFinal"] > 0)].copy()
-    edad_max_hist = int(hist_v["Edad"].max()) if not hist_v.empty else edad_act
 
-    hover_real_parts = [
-        "<b>── REAL ──</b>",
-        "Día %{x}",
-        "Peso real: <b>%{y:.3f} kg</b>",
-        "FCR real: %{customdata[0]:.4f}",
-        "Precio kg real: %{customdata[1]:.3f} $/kg",
-        "Costo real acum: <b>$%{customdata[2]:,.0f}</b>",
-        "Costo ideal comparable: $%{customdata[3]:,.0f}",
-        "Diferencia: $%{customdata[4]:+,.0f}",
+    custom_real = np.array([
+        [
+            fmt_num(r.get(fcr_col_hist, np.nan), 4),
+            fmt_num(r.get("FCR_ideal", np.nan), 4),
+            fmt_num(r.get("PrecioKgRealDia", np.nan), 3, prefix="$", suffix="/kg"),
+            fmt_manager(r.get("CostoAcum", np.nan), prefix="$"),
+            fmt_manager(r.get("CostoIdealAcum_calc", np.nan), prefix="$"),
+            fmt_signed_short(r.get("DifCosto_calc", np.nan), prefix="$"),
+            fmt_manager(r.get("AlimAcumKg", np.nan), suffix=" kg"),
+            fmt_manager(r.get("AlimIdealAcum_calc", np.nan), suffix=" kg"),
+        ]
+        for _, r in hist_v.iterrows()
+    ], dtype=object)
+
+    hover_real = (
+        "<b>── REAL ──</b><br>"
+        "Día %{x}<br>"
+        "Peso real: <b>%{y:.3f} kg</b><br>"
+        "FCR real: %{customdata[0]}<br>"
+        "FCR ideal: %{customdata[1]}<br>"
+        "Precio kg real: %{customdata[2]}<br>"
+        "Costo real acum: <b>%{customdata[3]}</b><br>"
+        "Costo ideal comparable: %{customdata[4]}<br>"
+        "Diferencia: %{customdata[5]}<br>"
+        "Alim real acum: %{customdata[6]}<br>"
+        "Alim ideal acum: %{customdata[7]}"
         "<extra></extra>"
-    ]
-    hover_real = "<br>".join(hover_real_parts)
-
-    custom_real = np.column_stack([
-        hist_v[fcr_col_hist].fillna(0).values,
-        hist_v["PrecioKgRealDia"].fillna(0).values,
-        hist_v["CostoAcum"].fillna(0).values,
-        hist_v["CostoIdealAcum_calc"].fillna(0).values,
-        hist_v["DifCosto_calc"].fillna(0).values,
-    ])
+    )
 
     fig_ri = go.Figure()
 
@@ -839,21 +859,34 @@ with left:
     if tiene_ideal and "PesoIdeal" in hist_v.columns:
         ideal_plot = hist_v[hist_v["PesoIdeal"].notna()].copy()
 
-        hover_ideal_parts = [
-            "<b>── IDEAL ──</b>",
-            "Día %{x}",
-            "Peso ideal: <b>%{y:.3f} kg</b>",
-            "FCR ideal: %{customdata[0]:.4f}",
-            "Precio kg galpón: %{customdata[1]:.3f} $/kg",
-            "Costo ideal comparable: <b>$%{customdata[2]:,.0f}</b>",
-            "<extra></extra>"
-        ]
+        custom_ideal = np.array([
+            [
+                fmt_num(r.get(fcr_col_hist, np.nan), 4),
+                fmt_num(r.get("FCR_ideal", np.nan), 4),
+                fmt_num(r.get("PrecioKgRealDia", np.nan), 3, prefix="$", suffix="/kg"),
+                fmt_manager(r.get("CostoAcum", np.nan), prefix="$"),
+                fmt_manager(r.get("CostoIdealAcum_calc", np.nan), prefix="$"),
+                fmt_signed_short(r.get("DifCosto_calc", np.nan), prefix="$"),
+                fmt_manager(r.get("AlimAcumKg", np.nan), suffix=" kg"),
+                fmt_manager(r.get("AlimIdealAcum_calc", np.nan), suffix=" kg"),
+            ]
+            for _, r in ideal_plot.iterrows()
+        ], dtype=object)
 
-        custom_ideal = np.column_stack([
-            ideal_plot["FCR_ideal"].fillna(0).values,
-            ideal_plot["PrecioKgRealDia"].fillna(0).values,
-            ideal_plot["CostoIdealAcum_calc"].fillna(0).values,
-        ])
+        hover_ideal = (
+            "<b>── IDEAL ──</b><br>"
+            "Día %{x}<br>"
+            "Peso ideal: <b>%{y:.3f} kg</b><br>"
+            "FCR real: %{customdata[0]}<br>"
+            "FCR ideal: %{customdata[1]}<br>"
+            "Precio kg real: %{customdata[2]}<br>"
+            "Costo real acum: %{customdata[3]}<br>"
+            "Costo ideal comparable: <b>%{customdata[4]}</b><br>"
+            "Diferencia: %{customdata[5]}<br>"
+            "Alim real acum: %{customdata[6]}<br>"
+            "Alim ideal acum: %{customdata[7]}"
+            "<extra></extra>"
+        )
 
         fig_ri.add_trace(go.Scatter(
             x=ideal_plot["Edad"], y=ideal_plot["PesoIdeal"],
@@ -861,7 +894,7 @@ with left:
             line=dict(color=GREEN, width=2.5, dash="dash"),
             marker=dict(size=5, symbol="diamond", color=GREEN, line=dict(color="white", width=1)),
             customdata=custom_ideal,
-            hovertemplate="<br>".join(hover_ideal_parts),
+            hovertemplate=hover_ideal,
         ))
 
         hm = hist_v[hist_v["PesoIdeal"].notna()].copy()
@@ -902,7 +935,7 @@ with left:
             color=CHART_TEXT,
             tickfont=dict(color=CHART_TEXT),
             title_font=dict(color=CHART_TEXT),
-            dtick=7,
+            dtick=dtick_x,
             tick0=0
         ),
         yaxis=dict(
@@ -925,16 +958,39 @@ with left:
     # ── GRÁFICO COSTO ACUMULADO REAL vs IDEAL ────────────────
     st.caption("**Costo acumulado comparable: REAL vs IDEAL usando el precio/kg real del galpón**")
 
+    if pd.notna(edad_max_lote) and edad_max_lote <= EDAD_MIN_ANALISIS:
+        hist_c = hist_cmp.copy()
+    else:
+        hist_c = hist_cmp[hist_cmp["Edad"] >= EDAD_MIN_ANALISIS].copy()
+
     fig_c = go.Figure()
 
-    hist_c = hist_cmp[hist_cmp["Edad"] >= EDAD_MIN_ANALISIS].copy()
+    custom_real_c = np.array([
+        [
+            fmt_num(r.get("PrecioKgRealDia", np.nan), 3, prefix="$", suffix="/kg"),
+            fmt_manager(r.get("CostoAcum", np.nan), prefix="$"),
+            fmt_manager(r.get("CostoIdealAcum_calc", np.nan), prefix="$"),
+            fmt_signed_short(r.get("DifCosto_calc", np.nan), prefix="$"),
+            fmt_manager(r.get("AlimAcumKg", np.nan), suffix=" kg"),
+            fmt_manager(r.get("AlimIdealAcum_calc", np.nan), suffix=" kg"),
+            fmt_num(r.get(fcr_col_hist, np.nan), 4),
+            fmt_num(r.get("FCR_ideal", np.nan), 4),
+        ]
+        for _, r in hist_c.iterrows()
+    ], dtype=object)
 
     hover_real_c = (
-        "<b>REAL</b> Día %{x}<br>"
-        "Precio kg real: %{customdata[0]:.3f} $/kg<br>"
-        "Costo acum real: <b>$%{y:,.0f}</b><br>"
-        "Costo acum ideal comparable: $%{customdata[1]:,.0f}<br>"
-        "Diferencia: %{customdata[2]:+,.0f}<extra></extra>"
+        "<b>── REAL ──</b><br>"
+        "Día %{x}<br>"
+        "Costo real acum: <b>%{customdata[1]}</b><br>"
+        "Costo ideal comparable: %{customdata[2]}<br>"
+        "Diferencia: %{customdata[3]}<br>"
+        "Precio kg real: %{customdata[0]}<br>"
+        "FCR real: %{customdata[6]}<br>"
+        "FCR ideal: %{customdata[7]}<br>"
+        "Alim real acum: %{customdata[4]}<br>"
+        "Alim ideal acum: %{customdata[5]}"
+        "<extra></extra>"
     )
 
     fig_c.add_trace(go.Scatter(
@@ -943,32 +999,48 @@ with left:
         line=dict(color=RED, width=3),
         marker=dict(size=6, color=RED, line=dict(color="white", width=1)),
         fill="tozeroy", fillcolor="rgba(218,41,28,0.08)",
-        customdata=np.column_stack([
-            hist_c["PrecioKgRealDia"].fillna(0).values,
-            hist_c["CostoIdealAcum_calc"].fillna(0).values,
-            hist_c["DifCosto_calc"].fillna(0).values,
-        ]),
+        customdata=custom_real_c,
         hovertemplate=hover_real_c,
     ))
 
     if tiene_ideal:
         ideal_c = hist_c[hist_c["CostoIdealAcum_calc"].notna()].copy()
         if not ideal_c.empty:
+            custom_ideal_c = np.array([
+                [
+                    fmt_num(r.get("PrecioKgRealDia", np.nan), 3, prefix="$", suffix="/kg"),
+                    fmt_manager(r.get("CostoAcum", np.nan), prefix="$"),
+                    fmt_manager(r.get("CostoIdealAcum_calc", np.nan), prefix="$"),
+                    fmt_signed_short(r.get("DifCosto_calc", np.nan), prefix="$"),
+                    fmt_manager(r.get("AlimAcumKg", np.nan), suffix=" kg"),
+                    fmt_manager(r.get("AlimIdealAcum_calc", np.nan), suffix=" kg"),
+                    fmt_num(r.get(fcr_col_hist, np.nan), 4),
+                    fmt_num(r.get("FCR_ideal", np.nan), 4),
+                ]
+                for _, r in ideal_c.iterrows()
+            ], dtype=object)
+
+            hover_ideal_c = (
+                "<b>── IDEAL ──</b><br>"
+                "Día %{x}<br>"
+                "Costo real acum: %{customdata[1]}<br>"
+                "Costo ideal comparable: <b>%{customdata[2]}</b><br>"
+                "Diferencia: %{customdata[3]}<br>"
+                "Precio kg real: %{customdata[0]}<br>"
+                "FCR real: %{customdata[6]}<br>"
+                "FCR ideal: %{customdata[7]}<br>"
+                "Alim real acum: %{customdata[4]}<br>"
+                "Alim ideal acum: %{customdata[5]}"
+                "<extra></extra>"
+            )
+
             fig_c.add_trace(go.Scatter(
                 x=ideal_c["Edad"], y=ideal_c["CostoIdealAcum_calc"],
                 mode="lines+markers", name="Costo Ideal Comparable",
                 line=dict(color=GREEN, width=2, dash="dash"),
                 marker=dict(size=5, symbol="diamond", color=GREEN, line=dict(color="white", width=1)),
-                customdata=np.column_stack([
-                    ideal_c["PrecioKgRealDia"].fillna(0).values,
-                    ideal_c["AlimIdealAcum_calc"].fillna(0).values,
-                ]),
-                hovertemplate=(
-                    "<b>IDEAL</b> Día %{x}<br>"
-                    "Precio kg galpón: %{customdata[0]:.3f} $/kg<br>"
-                    "Alimento ideal acum: %{customdata[1]:,.0f} kg<br>"
-                    "Costo acum ideal comparable: <b>$%{y:,.0f}</b><extra></extra>"
-                ),
+                customdata=custom_ideal_c,
+                hovertemplate=hover_ideal_c,
             ))
 
     fig_c.update_layout(
@@ -991,7 +1063,7 @@ with left:
             color=CHART_TEXT,
             tickfont=dict(color=CHART_TEXT),
             title_font=dict(color=CHART_TEXT),
-            dtick=7
+            dtick=dtick_x
         ),
         yaxis=dict(
             title="Costo alimento acum ($)",
@@ -1003,15 +1075,49 @@ with left:
         hovermode="x unified",
     )
     st.plotly_chart(fig_c, width="stretch", key=f"chart_costo_{lote_sel}")
-
 # ══════════════════════════════════════════════════════════════
 # COLUMNA DERECHA — SEC 04 · PREDICCIÓN
 # ══════════════════════════════════════════════════════════════
 with right:
 
+    def fmt_signed_short_r(n, prefix="", suffix=""):
+        if pd.isna(n):
+            return "—"
+        x = float(n)
+        base = fmt_manager(abs(x), prefix=prefix, suffix=suffix)
+        if x > 0:
+            return f"+{base}"
+        elif x < 0:
+            return f"-{base}"
+        return base
+
+    def render_kpi_small_r(value_html, label, accent=False):
+        cls = "kpi-chip accent" if accent else "kpi-chip"
+        md(f'''
+<div class="{cls}" style="
+    padding:10px 10px;
+    min-height:74px;
+    display:flex;
+    flex-direction:column;
+    justify-content:center;
+">
+    <div class="kv" style="
+        font-size:1rem;
+        line-height:1.05;
+        white-space:normal;
+        word-break:break-word;
+        overflow-wrap:anywhere;
+    ">{value_html}</div>
+    <div class="kl" style="
+        font-size:.66rem;
+        line-height:1.1;
+        margin-top:4px;
+    ">{label}</div>
+</div>''')
+
     try:
-        MODEL_PATH  = "modelo_rf_avicola.joblib"
-        predictor   = get_predictor_cached(MODEL_PATH, _file_mtime(MODEL_PATH)) if os.path.exists(MODEL_PATH) else None
+        MODEL_PATH = "modelo_rf_avicola.joblib"
+        predictor = get_predictor_cached(MODEL_PATH, _file_mtime(MODEL_PATH)) if os.path.exists(MODEL_PATH) else None
         pred_activo = predictor is not None and predictor.model is not None
     except Exception as e:
         st.warning(f"⚠️ No se pudo cargar el predictor: {e}")
@@ -1046,17 +1152,21 @@ display:flex;align-items:center;justify-content:center;">
 
             # ── Datos base del lote ────────────────────────────
             info_plot_pred = SF[SF["LoteCompleto"] == lote_sel].iloc[0]
-            zona_pred  = info_plot_pred["ZonaNombre"]
-            tipo_pred  = info_plot_pred["TipoStd"]
+            zona_pred = info_plot_pred["ZonaNombre"]
+            tipo_pred = info_plot_pred["TipoStd"]
             quint_pred = info_plot_pred["Quintil"]
 
-            hist_real_plot = DF[DF["LoteCompleto"] == lote_sel].copy()
+            # HISTÓRICO VISUAL = ya enriquecido con ideal comparable
+            hist_real_plot = DF_FILTRADO[DF_FILTRADO["LoteCompleto"] == lote_sel].copy()
             hist_real_plot["Edad"] = pd.to_numeric(hist_real_plot["Edad"], errors="coerce")
             hist_real_plot["PesoFinal"] = pd.to_numeric(hist_real_plot["PesoFinal"], errors="coerce")
 
             for c in [
                 "AvesVivas", "CostoAcum", "CostoAlimentoDia", "_alim_dia", "AlimAcumKg",
-                "PrecioKg", "precio_kg", "Precio_Kg", "KgLive", "conversio alimenticia", "FCR_Cum"
+                "PrecioKg", "PrecioKgRealDia", "KgLive", "FCR_Cum",
+                "FCR_ideal", "PesoIdeal_comp", "KgLiveIdeal_comp",
+                "AlimIdealAcum_comp", "AlimIdealDia_comp",
+                "CostoIdealDia_comp", "CostoIdealComp", "GapCostoComp"
             ]:
                 if c in hist_real_plot.columns:
                     hist_real_plot[c] = pd.to_numeric(hist_real_plot[c], errors="coerce")
@@ -1083,36 +1193,14 @@ display:flex;align-items:center;justify-content:center;">
                 else np.nan
             )
 
-            # La visualización SIEMPRE corta en día 35
             display_day_max = TARGET_DAY
-
-            # La predicción no puede ir hacia atrás; si el lote ya pasó de 35, igual mantenemos estabilidad
             target_pred_day = max(TARGET_DAY, edad_actual)
 
             # ── Precio/kg real del galpón por día ──────────────
-            precio_col = None
-            for c in ["PrecioKg", "precio_kg", "Precio_Kg"]:
-                if c in hist_real_plot.columns:
-                    precio_col = c
-                    break
-
-            if precio_col:
-                hist_real_plot["PrecioKgRealDia"] = pd.to_numeric(hist_real_plot[precio_col], errors="coerce")
-            else:
+            if "PrecioKgRealDia" not in hist_real_plot.columns:
                 hist_real_plot["PrecioKgRealDia"] = np.nan
 
-            # 1) costo diario / alimento diario
-            if "CostoAlimentoDia" in hist_real_plot.columns and "_alim_dia" in hist_real_plot.columns:
-                hist_real_plot["PrecioKgRealDia"] = hist_real_plot["PrecioKgRealDia"].fillna(
-                    hist_real_plot["CostoAlimentoDia"] / hist_real_plot["_alim_dia"].replace(0, np.nan)
-                )
-
-            # 2) costo acumulado / alimento acumulado
-            if "CostoAcum" in hist_real_plot.columns and "AlimAcumKg" in hist_real_plot.columns:
-                hist_real_plot["PrecioKgRealDia"] = hist_real_plot["PrecioKgRealDia"].fillna(
-                    hist_real_plot["CostoAcum"] / hist_real_plot["AlimAcumKg"].replace(0, np.nan)
-                )
-
+            hist_real_plot["PrecioKgRealDia"] = pd.to_numeric(hist_real_plot["PrecioKgRealDia"], errors="coerce")
             hist_real_plot["PrecioKgRealDia"] = hist_real_plot["PrecioKgRealDia"].ffill().bfill()
 
             serie_precios_validos = hist_real_plot["PrecioKgRealDia"].dropna()
@@ -1135,13 +1223,6 @@ display:flex;align-items:center;justify-content:center;">
             if pd.isna(precio_kg_ultimo):
                 precio_kg_ultimo = precio_kg_promedio_ref
 
-            # KgLive real si no viene calculado
-            if "KgLive" not in hist_real_plot.columns or hist_real_plot["KgLive"].isna().all():
-                if "AvesVivas" in hist_real_plot.columns:
-                    hist_real_plot["KgLive"] = hist_real_plot["AvesVivas"] * hist_real_plot["PesoFinal"]
-                else:
-                    hist_real_plot["KgLive"] = np.nan
-
             # ── Cache de predicción ─────────────────────────────
             if "pred_cache" not in st.session_state:
                 st.session_state["pred_cache"] = {}
@@ -1150,8 +1231,9 @@ display:flex;align-items:center;justify-content:center;">
 
             if cache_key not in st.session_state["pred_cache"]:
                 with st.spinner("⏳ Calculando predicción..."):
-                    hist_raw = DF[DF["LoteCompleto"] == lote_sel].sort_values("Edad").copy()
-                    hist_pred = _limpiar_historial_para_modelo(hist_raw)
+                    # Para el modelo usamos la base original
+                    hist_raw_model = DF_ALL[DF_ALL["LoteCompleto"] == lote_sel].sort_values("Edad").copy()
+                    hist_pred = _limpiar_historial_para_modelo(hist_raw_model)
 
                     if hist_pred.empty:
                         st.session_state["pred_cache"][cache_key] = {
@@ -1271,27 +1353,11 @@ display:flex;align-items:center;justify-content:center;">
                             df_curve_plot = df_curve_plot[df_curve_plot["Dia"] <= TARGET_DAY].copy()
 
                     # ── REAL histórico con costo ideal comparable ─
-                    hist_real_hover = hist_real_plot.copy()
-
-                    if ideal_pred_plot is not None and not ideal_pred_plot.empty and "FCR_ideal" in ideal_pred_plot.columns:
-                        hist_real_hover = hist_real_hover.merge(
-                            ideal_pred_plot[["Edad", "FCR_ideal"]],
-                            on="Edad", how="left"
-                        )
-                    else:
-                        hist_real_hover["FCR_ideal"] = np.nan
-
-                    hist_real_hover["AlimIdealAcum_comp"] = hist_real_hover["FCR_ideal"] * hist_real_hover["KgLive"]
-                    hist_real_hover["AlimIdealDia_comp"] = hist_real_hover["AlimIdealAcum_comp"].diff()
-
-                    if not hist_real_hover.empty:
-                        hist_real_hover.loc[hist_real_hover.index[0], "AlimIdealDia_comp"] = hist_real_hover.iloc[0]["AlimIdealAcum_comp"]
-
-                    hist_real_hover["AlimIdealDia_comp"] = hist_real_hover["AlimIdealDia_comp"].clip(lower=0)
-                    hist_real_hover["CostoIdealDia_comp"] = hist_real_hover["AlimIdealDia_comp"] * hist_real_hover["PrecioKgRealDia"]
-                    hist_real_hover["CostoIdealAcum_comp"] = hist_real_hover["CostoIdealDia_comp"].fillna(0).cumsum()
-                    hist_real_hover["GapCosto_comp"] = hist_real_hover["CostoAcum"] - hist_real_hover["CostoIdealAcum_comp"]
-
+                    hist_real_hover = hist_real_plot.copy().sort_values("Edad").reset_index(drop=True)
+                    hist_real_hover["CostoIdealAcum_comp"] = hist_real_hover.get("CostoIdealComp", np.nan)
+                    hist_real_hover["GapCosto_comp"] = hist_real_hover.get("GapCostoComp", np.nan)
+                    hist_real_hover["AlimIdealAcum_comp"] = hist_real_hover.get("AlimIdealAcum_comp", np.nan)
+                    hist_real_hover["FCR_ideal"] = hist_real_hover.get("FCR_ideal", np.nan)
                     hist_real_hover = hist_real_hover[hist_real_hover["Edad"] <= TARGET_DAY].copy()
 
                     costo_real_hoy = (
@@ -1316,14 +1382,14 @@ display:flex;align-items:center;justify-content:center;">
                         else 1.0
                     )
 
-                    # ── IDEAL line con costo comparable usando precio real/avg del lote ─
+                    # ── IDEAL line con costo comparable usando precio real del lote ─
                     ideal_line_df = pd.DataFrame()
                     if ideal_pred_plot is not None and not ideal_pred_plot.empty and ideal_ycol is not None:
                         ideal_line_df = ideal_pred_plot.copy()
                         ideal_line_df = ideal_line_df.rename(columns={ideal_ycol: "PesoIdeal"})
 
                         ideal_line_df = ideal_line_df.merge(
-                            hist_real_plot[["Edad", "PrecioKgRealDia", "AvesVivas"]],
+                            hist_real_plot[["Edad", "PrecioKgRealDia", "AvesVivas", "CostoAcum", "AlimAcumKg", "FCR_Cum"]],
                             on="Edad", how="left"
                         ).sort_values("Edad")
 
@@ -1334,6 +1400,9 @@ display:flex;align-items:center;justify-content:center;">
                             .fillna(precio_kg_promedio_ref)
                         )
                         ideal_line_df["AvesVivas"] = ideal_line_df["AvesVivas"].ffill().bfill().fillna(aves_actual)
+                        ideal_line_df["CostoAcum"] = ideal_line_df["CostoAcum"].ffill()
+                        ideal_line_df["AlimAcumKg"] = ideal_line_df["AlimAcumKg"].ffill()
+                        ideal_line_df["FCR_Cum"] = ideal_line_df["FCR_Cum"].ffill()
 
                         ideal_line_df["KgLiveIdeal"] = ideal_line_df["AvesVivas"] * ideal_line_df["PesoIdeal"]
                         ideal_line_df["AlimIdealAcum_line"] = ideal_line_df["FCR_ideal"] * ideal_line_df["KgLiveIdeal"]
@@ -1345,6 +1414,7 @@ display:flex;align-items:center;justify-content:center;">
                         ideal_line_df["AlimIdealDia_line"] = ideal_line_df["AlimIdealDia_line"].clip(lower=0)
                         ideal_line_df["CostoIdealDia_line"] = ideal_line_df["AlimIdealDia_line"] * ideal_line_df["PrecioKgRealDia"]
                         ideal_line_df["CostoIdealAcum_line"] = ideal_line_df["CostoIdealDia_line"].fillna(0).cumsum()
+                        ideal_line_df["GapCosto_line"] = ideal_line_df["CostoAcum"] - ideal_line_df["CostoIdealAcum_line"]
                         ideal_line_df = ideal_line_df[ideal_line_df["Edad"] <= TARGET_DAY].copy()
 
                     # ── PROYECCIÓN con costo comparable hasta día 35 ─
@@ -1416,25 +1486,32 @@ display:flex;align-items:center;justify-content:center;">
                     # ── KPIs superiores ────────────────────────────
                     c1, c2, c3, c4 = st.columns(4)
                     with c1:
-                        md(f'<div class="kpi-chip accent"><div class="kv">{peso_objetivo:.3f} kg</div><div class="kl">Peso objetivo D{TARGET_DAY}</div></div>')
+                        render_kpi_small_r(f"{peso_objetivo:.3f} kg", f"Peso objetivo D{TARGET_DAY}", accent=True)
                     with c2:
-                        md(f'<div class="kpi-chip"><div class="kv">{dias_rest} d</div><div class="kl">Días restantes</div></div>')
+                        render_kpi_small_r(f"{dias_rest} d", "Días restantes")
                     with c3:
-                        md(f'<div class="kpi-chip"><div class="kv">{fmt_manager(costo_estimado_obj, prefix="$")}</div><div class="kl">Costo estimado D{TARGET_DAY}</div></div>')
+                        render_kpi_small_r(fmt_manager(costo_estimado_obj, prefix="$"), f"Costo estimado D{TARGET_DAY}")
                     with c4:
-                        md(f'<div class="kpi-chip"><div class="kv">{fmt_manager(gap_estimado_obj, prefix="$")}</div><div class="kl">Gap estimado D{TARGET_DAY}</div></div>')
+                        render_kpi_small_r(fmt_manager(gap_estimado_obj, prefix="$"), f"Gap estimado D{TARGET_DAY}")
 
                     # ── Gráfico: REAL + IDEAL + PROYECCIÓN ─────────
                     fig_p = go.Figure()
 
                     # 1) REAL
                     if not hist_real_hover.empty:
-                        custom_real_pred = np.column_stack([
-                            hist_real_hover["PrecioKgRealDia"].fillna(0).values,
-                            hist_real_hover["CostoAcum"].fillna(0).values,
-                            hist_real_hover["CostoIdealAcum_comp"].fillna(0).values,
-                            hist_real_hover["GapCosto_comp"].fillna(0).values,
-                        ])
+                        custom_real_pred = np.array([
+                            [
+                                fmt_num(r.get("PrecioKgRealDia", np.nan), 3, prefix="$", suffix="/kg"),
+                                fmt_manager(r.get("CostoAcum", np.nan), prefix="$"),
+                                fmt_manager(r.get("CostoIdealAcum_comp", np.nan), prefix="$"),
+                                fmt_signed_short_r(r.get("GapCosto_comp", np.nan), prefix="$"),
+                                fmt_manager(r.get("AlimAcumKg", np.nan), suffix=" kg"),
+                                fmt_manager(r.get("AlimIdealAcum_comp", np.nan), suffix=" kg"),
+                                fmt_num(r.get("FCR_Cum", np.nan), 4),
+                                fmt_num(r.get("FCR_ideal", np.nan), 4),
+                            ]
+                            for _, r in hist_real_hover.iterrows()
+                        ], dtype=object)
 
                         fig_p.add_trace(go.Scatter(
                             x=hist_real_hover["Edad"],
@@ -1445,23 +1522,36 @@ display:flex;align-items:center;justify-content:center;">
                             marker=dict(size=6, color=BLUE, line=dict(color="white", width=1)),
                             customdata=custom_real_pred,
                             hovertemplate=(
-                                "<b>REAL</b><br>"
+                                "<b>── REAL ──</b><br>"
                                 "Día %{x}<br>"
                                 "Peso: <b>%{y:.3f} kg</b><br>"
-                                "Precio kg real: %{customdata[0]:.3f} $/kg<br>"
-                                "Costo real: <b>$%{customdata[1]:,.0f}</b><br>"
-                                "Costo ideal comparable: $%{customdata[2]:,.0f}<br>"
-                                "Diferencia: $%{customdata[3]:+,.0f}"
+                                "Precio kg real: %{customdata[0]}<br>"
+                                "Costo real: <b>%{customdata[1]}</b><br>"
+                                "Costo ideal comparable: %{customdata[2]}<br>"
+                                "Gap: %{customdata[3]}<br>"
+                                "Alim real acum: %{customdata[4]}<br>"
+                                "Alim ideal acum: %{customdata[5]}<br>"
+                                "FCR real: %{customdata[6]}<br>"
+                                "FCR ideal: %{customdata[7]}"
                                 "<extra></extra>"
                             ),
                         ))
 
                     # 2) IDEAL
                     if not ideal_line_df.empty:
-                        custom_ideal_pred = np.column_stack([
-                            ideal_line_df["PrecioKgRealDia"].fillna(0).values,
-                            ideal_line_df["CostoIdealAcum_line"].fillna(0).values,
-                        ])
+                        custom_ideal_pred = np.array([
+                            [
+                                fmt_num(r.get("PrecioKgRealDia", np.nan), 3, prefix="$", suffix="/kg"),
+                                fmt_manager(r.get("CostoAcum", np.nan), prefix="$"),
+                                fmt_manager(r.get("CostoIdealAcum_line", np.nan), prefix="$"),
+                                fmt_signed_short_r(r.get("GapCosto_line", np.nan), prefix="$"),
+                                fmt_manager(r.get("AlimAcumKg", np.nan), suffix=" kg"),
+                                fmt_manager(r.get("AlimIdealAcum_line", np.nan), suffix=" kg"),
+                                fmt_num(r.get("FCR_Cum", np.nan), 4),
+                                fmt_num(r.get("FCR_ideal", np.nan), 4),
+                            ]
+                            for _, r in ideal_line_df.iterrows()
+                        ], dtype=object)
 
                         fig_p.add_trace(go.Scatter(
                             x=ideal_line_df["Edad"],
@@ -1472,23 +1562,34 @@ display:flex;align-items:center;justify-content:center;">
                             marker=dict(size=5, symbol="diamond", color=GREEN, line=dict(color="white", width=1)),
                             customdata=custom_ideal_pred,
                             hovertemplate=(
-                                "<b>IDEAL</b><br>"
+                                "<b>── IDEAL ──</b><br>"
                                 "Día %{x}<br>"
                                 "Peso ideal: <b>%{y:.3f} kg</b><br>"
-                                "Precio kg referencia: %{customdata[0]:.3f} $/kg<br>"
-                                "Costo ideal comparable: <b>$%{customdata[1]:,.0f}</b>"
+                                "Precio kg referencia: %{customdata[0]}<br>"
+                                "Costo real: %{customdata[1]}<br>"
+                                "Costo ideal comparable: <b>%{customdata[2]}</b><br>"
+                                "Gap: %{customdata[3]}<br>"
+                                "Alim real acum: %{customdata[4]}<br>"
+                                "Alim ideal acum: %{customdata[5]}<br>"
+                                "FCR real: %{customdata[6]}<br>"
+                                "FCR ideal: %{customdata[7]}"
                                 "<extra></extra>"
                             ),
                         ))
 
                     # 3) PROYECCIÓN
                     if not proj_cost_df.empty and ycol_pred is not None:
-                        custom_pred_cost = np.column_stack([
-                            proj_cost_df["PrecioKgRef"].fillna(0).values,
-                            proj_cost_df["CostoIdealAcum_pred"].fillna(0).values,
-                            proj_cost_df["CostoAcum_estimado"].fillna(0).values,
-                            proj_cost_df["GapCosto_estimado"].fillna(0).values,
-                        ])
+                        custom_pred_cost = np.array([
+                            [
+                                fmt_num(r.get("PrecioKgRef", np.nan), 3, prefix="$", suffix="/kg"),
+                                fmt_manager(r.get("CostoIdealAcum_pred", np.nan), prefix="$"),
+                                fmt_manager(r.get("CostoAcum_estimado", np.nan), prefix="$"),
+                                fmt_signed_short_r(r.get("GapCosto_estimado", np.nan), prefix="$"),
+                                fmt_manager(r.get("AlimIdealAcum_pred", np.nan), suffix=" kg"),
+                                fmt_num(r.get("FCR_ideal", np.nan), 4),
+                            ]
+                            for _, r in proj_cost_df.iterrows()
+                        ], dtype=object)
 
                         fig_p.add_trace(go.Scatter(
                             x=proj_cost_df["Dia"],
@@ -1499,13 +1600,15 @@ display:flex;align-items:center;justify-content:center;">
                             marker=dict(size=5, color=RED),
                             customdata=custom_pred_cost,
                             hovertemplate=(
-                                "<b>PROYECCIÓN</b><br>"
+                                "<b>── PROYECCIÓN ──</b><br>"
                                 "Día %{x}<br>"
                                 "Peso proyectado: <b>%{y:.3f} kg</b><br>"
-                                "Precio kg referencia: %{customdata[0]:.3f} $/kg<br>"
-                                "Costo ideal proyectado: $%{customdata[1]:,.0f}<br>"
-                                "Costo estimado proyectado: <b>$%{customdata[2]:,.0f}</b><br>"
-                                "Diferencia estimada: $%{customdata[3]:+,.0f}"
+                                "Precio kg referencia: %{customdata[0]}<br>"
+                                "Costo ideal proyectado: %{customdata[1]}<br>"
+                                "Costo estimado proyectado: <b>%{customdata[2]}</b><br>"
+                                "Gap estimado: %{customdata[3]}<br>"
+                                "Alim ideal acum: %{customdata[4]}<br>"
+                                "FCR ideal: %{customdata[5]}"
                                 "<extra></extra>"
                             ),
                         ))
@@ -1523,7 +1626,6 @@ display:flex;align-items:center;justify-content:center;">
                                 hovertemplate=f"Día {TARGET_DAY}<br>%{{y:.3f}} kg<extra></extra>",
                             ))
 
-                    # 5) Línea vertical hoy (solo si cabe en la vista)
                     if edad_actual <= TARGET_DAY:
                         fig_p.add_vline(
                             x=edad_actual,
@@ -1603,7 +1705,7 @@ display:flex;align-items:center;justify-content:center;">
                                 lambda x: fmt_manager(x, prefix="$")
                             )
                             tabla_pred_show["GapEstimadoFmt"] = tabla_pred_show["GapCosto_estimado"].apply(
-                                lambda x: fmt_manager(x, prefix="$")
+                                lambda x: fmt_signed_short_r(x, prefix="$")
                             )
 
                             tabla_pred_show = tabla_pred_show[[
