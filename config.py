@@ -5,7 +5,7 @@
 
 # ── Archivos de datos ─────────────────────────────────────────
 MAIN_FILE         = "produccion_mes_actual_simulada_abiertos.xlsx"
-BENCH_FILE        = "LOTES_IDEALES_QUINTILES_COMPLETO.xlsx"
+BENCH_FILE = "LOTES_IDEALES_DASHBOARD_COMPATIBLE.xlsx"
 EDAD_MIN_ANALISIS = 7
 
 # ── Brand tokens ─────────────────────────────────────────────

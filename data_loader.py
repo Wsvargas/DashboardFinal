@@ -1,32 +1,3 @@
-# ──────────────────────────────────────────────────────────────
-# data_loader.py · PRONACA Dashboard v16
-# Adaptado a:
-#   produccion_mes_actual_simulada_abiertos.xlsx
-#   LOTES_IDEALES_QUINTILES_COMPLETO.xlsx
-#
-# LÓGICA CENTRALIZADA DEL IDEAL COMPARABLE:
-#   1) Del benchmark ideal usamos:
-#        - Edad
-#        - Peso ideal
-#        - FCR ideal
-#
-#   2) Recalculamos el alimento acumulado ideal del galpón real:
-#        AlimIdealAcum_comp = PesoIdeal * FCR_ideal * AvesVivas_reales
-#
-#   3) Calculamos el alimento ideal diario:
-#        AlimIdealDia_comp = diff(AlimIdealAcum_comp)
-#
-#   4) Costeamos el ideal con precios REALES diarios:
-#        CostoIdealDia_comp = AlimIdealDia_comp * PrecioKgRealDia
-#
-#   5) Acumulamos:
-#        CostoIdealComp = cumsum(CostoIdealDia_comp)
-#
-#   6) Si el lote tiene días con alimento real 0 (ej. cierre),
-#      ese día NO genera costo ideal:
-#        _alim_dia == 0  ->  AlimIdealDia_comp = 0 y CostoIdealDia_comp = 0
-# ──────────────────────────────────────────────────────────────
-
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -40,6 +11,13 @@ _ZONA_MAP = {"BUC": "BUCAY", "STO": "SANTO DOMINGO"}
 _TIPO_MAP = {
     "GRANJAPROPIA": "PROPIA", "PROPIA": "PROPIA",
     "PCA": "PAC",             "PAC":    "PAC",
+}
+
+# ── Mapeo de reproductora normalizada ─────────────────────────
+_REPRO_MAP = {
+    "ADULTA": "ADULTA",
+    "JOVEN": "JOVEN",
+    "VIEJA": "VIEJA",
 }
 
 
@@ -75,6 +53,91 @@ def _empty_comp_columns(hist: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def _norm_text(s) -> str:
+    if pd.isna(s):
+        return ""
+    x = str(s).strip().upper()
+    x = (
+        x.replace("Á", "A")
+         .replace("É", "E")
+         .replace("Í", "I")
+         .replace("Ó", "O")
+         .replace("Ú", "U")
+         .replace("Ñ", "N")
+    )
+    return x
+
+
+def _norm_reproductora_value(x) -> str:
+    x = _norm_text(x)
+    if not x:
+        return "SIN_DATO"
+
+    # Intenta detectar aunque venga dentro de un texto más largo
+    for k in _REPRO_MAP.keys():
+        if k in x:
+            return _REPRO_MAP[k]
+
+    return "SIN_DATO"
+
+
+def _extract_reproductora_from_scenario(series: pd.Series) -> pd.Series:
+    s = series.astype(str).str.upper().str.strip()
+    s = (
+        s.str.replace("Á", "A", regex=False)
+         .str.replace("É", "E", regex=False)
+         .str.replace("Í", "I", regex=False)
+         .str.replace("Ó", "O", regex=False)
+         .str.replace("Ú", "U", regex=False)
+         .str.replace("Ñ", "N", regex=False)
+    )
+
+    out = pd.Series("SIN_DATO", index=s.index, dtype="object")
+    out[s.str.contains("ADULTA", na=False)] = "ADULTA"
+    out[s.str.contains("JOVEN", na=False)] = "JOVEN"
+    out[s.str.contains("VIEJA", na=False)] = "VIEJA"
+    return out
+
+
+def _filtrar_ideal_sub(
+    ideales_df: pd.DataFrame,
+    zona: str,
+    tipo: str,
+    quint: str,
+    reproductora: str | None = None,
+) -> pd.DataFrame:
+    """
+    Filtro robusto:
+    1) intenta Zona + Tipo + Quintil + Reproductora
+    2) si no encuentra, cae a Zona + Tipo + Quintil
+    """
+    if ideales_df is None or ideales_df.empty:
+        return pd.DataFrame()
+
+    base = ideales_df[
+        (ideales_df["Zona_Nombre"] == zona) &
+        (ideales_df["TipoGranja"] == tipo) &
+        (ideales_df["Quintil"] == quint)
+    ].copy()
+
+    if base.empty:
+        return base
+
+    if "ReproductoraStd" not in base.columns:
+        return base
+
+    repro = _norm_reproductora_value(reproductora)
+    if repro == "SIN_DATO":
+        return base
+
+    exact = base[base["ReproductoraStd"] == repro].copy()
+    if not exact.empty:
+        return exact
+
+    # Fallback al esquema viejo
+    return base
+
+
 # ──────────────────────────────────────────────────────────────
 # DATOS PRINCIPALES
 # ──────────────────────────────────────────────────────────────
@@ -93,7 +156,7 @@ def load_and_prepare(path: str) -> pd.DataFrame:
     col_aves     = pick_first_col(df, ["Aves_vivas", "AvesVivas", "Aves Vivas", "Aves_netas"])
     col_granja   = pick_first_col(df, ["Granja", "GranjaID"])
     col_galpon   = pick_first_col(df, ["Galpon", "galpon"])
-    col_nombre_g = pick_first_col(df, ["NombreGranja", "Nombre Granja"])
+    col_nombre_g = pick_first_col(df, ["NombreGranja", "Nombre Granja", "Nombre_Granja"])
     col_tipo_a   = pick_first_col(df, ["TipoAlimento", "tipo_alimento"])
     col_cost     = pick_first_col(df, ["costo_alimento_acumulado", "CostoAlimentoAcum", "CostoAlimentoAcumulado"])
     col_cost_dia = pick_first_col(df, ["costo_alimento_dia", "CostoAlimentoDia"])
@@ -103,6 +166,7 @@ def load_and_prepare(path: str) -> pd.DataFrame:
     col_zona     = pick_first_col(df, ["Zona", "zona"])
     col_tipo     = pick_first_col(df, ["TipoGranjero", "TipoGranja", "Tipo_Granja", "Tipo de granja", "X30=Granja Propia"])
     col_quint    = pick_first_col(df, ["Quintil", "quintil", "Quintil_Area_Crianza"])
+    col_repro    = pick_first_col(df, ["Reproductora", "reproductora", "Categoria_Reproductora", "TipoReproductora", "Edad_Reproductora", "ReproductoraStd"])
     col_estado   = pick_first_col(df, ["Cerrado", "EstadoLote", "Estado_Lote"])
     col_cierre   = pick_first_col(df, ["Cierre de campaña", "CierreCampaña", "FechaCierre"])
     col_mort_ac  = pick_first_col(df, ["MortalidadDescarte_Acumulado", "MortalidadAcumulada"])
@@ -120,6 +184,8 @@ def load_and_prepare(path: str) -> pd.DataFrame:
         rename_map[col_pricekg] = "PrecioKg"
     if col_nombre_g:
         rename_map[col_nombre_g] = "NombreGranja"
+    if col_repro:
+        rename_map[col_repro] = "ReproductoraRaw"
 
     df = df.rename(columns=rename_map)
 
@@ -174,6 +240,12 @@ def load_and_prepare(path: str) -> pd.DataFrame:
     df["Quintil_num"] = df["Quintil"].map(
         {"Q1": 1, "Q2": 2, "Q3": 3, "Q4": 4, "Q5": 5}
     ).astype(float)
+
+    # ── NUEVO: Reproductora normalizada ───────────────────────
+    if "ReproductoraRaw" in df.columns:
+        df["ReproductoraStd"] = df["ReproductoraRaw"].apply(_norm_reproductora_value)
+    else:
+        df["ReproductoraStd"] = "SIN_DATO"
 
     # ── Tipos numéricos principales ───────────────────────────
     df["Edad"] = parse_num_series(df["Edad"])
@@ -327,18 +399,20 @@ def load_ideales(path: str) -> pd.DataFrame:
         df.columns = df.columns.astype(str).str.strip()
 
         # Zona_Nombre
-        zona_col = pick_first_col(df, ["Zona", "zona"])
+        zona_col = pick_first_col(df, ["Zona", "zona", "Zona_Nombre"])
         if zona_col:
             z = df[zona_col].astype(str).str.upper().str.strip()
-            df["Zona_Nombre"] = z.map(_ZONA_MAP).fillna("OTRA")
+            df["Zona_Nombre"] = z.map(_ZONA_MAP).fillna(z)
+            df["Zona_Nombre"] = df["Zona_Nombre"].replace({"BUCAY": "BUCAY", "SANTO DOMINGO": "SANTO DOMINGO"})
         else:
             df["Zona_Nombre"] = "BUCAY"
 
         # TipoGranja
-        tipo_col = pick_first_col(df, ["TipoGranja", "Tipo_Granja", "TipoGranjero"])
+        tipo_col = pick_first_col(df, ["TipoGranja", "Tipo_Granja", "TipoGranjero", "TipoStd"])
         if tipo_col:
             t = df[tipo_col].astype(str).str.upper().str.strip().str.replace(" ", "", regex=False)
-            df["TipoGranja"] = t.map(_TIPO_MAP).fillna("PAC")
+            df["TipoGranja"] = t.map(_TIPO_MAP).fillna(t)
+            df["TipoGranja"] = df["TipoGranja"].replace({"PROPIA": "PROPIA", "PAC": "PAC", "PCA": "PAC"})
         else:
             df["TipoGranja"] = "PAC"
 
@@ -346,6 +420,12 @@ def load_ideales(path: str) -> pd.DataFrame:
         if "Escenario" in df.columns:
             df["Quintil"] = (
                 df["Escenario"].astype(str).str.upper().str.strip()
+                .str.extract(r"(Q[1-5])", expand=False)
+                .fillna("Q5")
+            )
+        elif "Etiqueta_Escenario" in df.columns:
+            df["Quintil"] = (
+                df["Etiqueta_Escenario"].astype(str).str.upper().str.strip()
                 .str.extract(r"(Q[1-5])", expand=False)
                 .fillna("Q5")
             )
@@ -357,12 +437,28 @@ def load_ideales(path: str) -> pd.DataFrame:
                 .fillna("Q5")
             ) if quint_col else "Q5"
 
+        # ── NUEVO: Reproductora benchmark ──────────────────────
+        repro_col = pick_first_col(
+            df,
+            ["Reproductora", "reproductora", "ReproductoraStd", "Categoria_Reproductora", "TipoReproductora"]
+        )
+
+        if repro_col:
+            df["ReproductoraStd"] = df[repro_col].apply(_norm_reproductora_value)
+        elif "Etiqueta_Escenario" in df.columns:
+            df["ReproductoraStd"] = _extract_reproductora_from_scenario(df["Etiqueta_Escenario"])
+        elif "Escenario" in df.columns:
+            df["ReproductoraStd"] = _extract_reproductora_from_scenario(df["Escenario"])
+        else:
+            df["ReproductoraStd"] = "SIN_DATO"
+
         # Columnas base benchmark
-        if "Edad" in df.columns:
-            df["Edad"] = parse_num_series(df["Edad"])
+        edad_col = pick_first_col(df, ["Edad", "edad"])
+        if edad_col:
+            df["Edad"] = parse_num_series(df[edad_col])
 
         if "Peso" not in df.columns:
-            peso_col = pick_first_col(df, ["PesoFinal", "peso", "Peso_ideal", "PesoIdeal"])
+            peso_col = pick_first_col(df, ["PesoFinal", "peso", "Peso_ideal", "PesoIdeal", "Peso_comp_corregido", "Peso"])
             if peso_col:
                 df["Peso"] = df[peso_col]
 
@@ -371,7 +467,10 @@ def load_ideales(path: str) -> pd.DataFrame:
 
         # Normalizar FCR ideal
         if "FCR_ideal" not in df.columns:
-            fcr_col = pick_first_col(df, ["conversio alimenticia", "FCR", "FCRIdeal", "FCR_ideal"])
+            fcr_col = pick_first_col(
+                df,
+                ["conversio alimenticia", "FCR", "FCRIdeal", "FCR_ideal", "conversion"]
+            )
             if fcr_col:
                 df["FCR_ideal"] = parse_num_series(df[fcr_col])
             else:
@@ -380,11 +479,19 @@ def load_ideales(path: str) -> pd.DataFrame:
             df["FCR_ideal"] = parse_num_series(df["FCR_ideal"])
 
         # Otras columnas opcionales
-        for c in ["costo_alimento_acumulado", "costo_alimento_dia"]:
-            if c in df.columns:
-                df[c] = parse_num_series(df[c])
+        costo_acum_col = pick_first_col(df, ["costo_alimento_acumulado", "CostoAcum_ideal"])
+        costo_dia_col = pick_first_col(df, ["costo_alimento_dia", "CostoDia_ideal"])
 
-        return df.sort_values(["Zona_Nombre", "TipoGranja", "Quintil", "Edad"]).reset_index(drop=True)
+        if costo_acum_col:
+            df["costo_alimento_acumulado"] = parse_num_series(df[costo_acum_col])
+
+        if costo_dia_col:
+            df["costo_alimento_dia"] = parse_num_series(df[costo_dia_col])
+
+        return (
+            df.sort_values(["Zona_Nombre", "TipoGranja", "ReproductoraStd", "Quintil", "Edad"])
+              .reset_index(drop=True)
+        )
 
     except Exception as e:
         st.warning(f"⚠️ Error cargando ideales: {e}")
@@ -456,8 +563,6 @@ def resolver_precio_kg_real(df: pd.DataFrame) -> pd.DataFrame:
 
 # ──────────────────────────────────────────────────────────────
 # UTILIDAD: historial real + ideal comparable para UN lote
-# ideal_df debe venir filtrado al combo correcto:
-#   Zona_Nombre + TipoGranja + Quintil
 # ──────────────────────────────────────────────────────────────
 def construir_historial_ideal_comparable(
     hist_df: pd.DataFrame,
@@ -570,12 +675,15 @@ def enriquecer_historial_con_ideal(
         zona = hist_lote["ZonaNombre"].iloc[0] if "ZonaNombre" in hist_lote.columns else None
         tipo = hist_lote["TipoStd"].iloc[0] if "TipoStd" in hist_lote.columns else None
         quint = hist_lote["Quintil"].iloc[0] if "Quintil" in hist_lote.columns else None
+        repro = hist_lote["ReproductoraStd"].iloc[0] if "ReproductoraStd" in hist_lote.columns else "SIN_DATO"
 
-        ideal_sub = ideales_df[
-            (ideales_df["Zona_Nombre"] == zona) &
-            (ideales_df["TipoGranja"] == tipo) &
-            (ideales_df["Quintil"] == quint)
-        ].copy()
+        ideal_sub = _filtrar_ideal_sub(
+            ideales_df=ideales_df,
+            zona=zona,
+            tipo=tipo,
+            quint=quint,
+            reproductora=repro,
+        )
 
         hist_comp = construir_historial_ideal_comparable(hist_lote, ideal_sub)
         resultados.append(hist_comp)
@@ -602,11 +710,16 @@ def calcular_gaps_lotes(lotes_ids, df_hist, ideales_df):
             continue
 
         snap = lote_hist.iloc[-1]
-        ideal = ideales_df[
-            (ideales_df["Zona_Nombre"] == snap["ZonaNombre"]) &
-            (ideales_df["TipoGranja"] == snap["TipoStd"]) &
-            (ideales_df["Quintil"] == snap["Quintil"])
-        ]
+        repro = snap["ReproductoraStd"] if "ReproductoraStd" in snap.index else "SIN_DATO"
+
+        ideal = _filtrar_ideal_sub(
+            ideales_df=ideales_df,
+            zona=snap["ZonaNombre"],
+            tipo=snap["TipoStd"],
+            quint=snap["Quintil"],
+            reproductora=repro,
+        )
+
         if ideal.empty:
             continue
 
@@ -627,7 +740,6 @@ def calcular_gaps_lotes(lotes_ids, df_hist, ideales_df):
 
 # ──────────────────────────────────────────────────────────────
 # GAP FCR / COSTO POR GALPÓN
-# AHORA PRIORIZA COLUMNAS YA ENRIQUECIDAS DESDE EL HISTÓRICO
 # ──────────────────────────────────────────────────────────────
 def calcular_fcr_gaps_galpones(snap_df: pd.DataFrame, ideales_df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -642,7 +754,6 @@ def calcular_fcr_gaps_galpones(snap_df: pd.DataFrame, ideales_df: pd.DataFrame) 
 
     snap = snap_df.copy()
 
-    # Si no viene enriquecido, devolvemos lo que sí tengamos sin romper
     snap = _ensure_columns(
         snap,
         [
@@ -650,7 +761,7 @@ def calcular_fcr_gaps_galpones(snap_df: pd.DataFrame, ideales_df: pd.DataFrame) 
             "AvesVivas", "KgLive", "PrecioKgRealDia", "PrecioKg",
             "PesoIdeal_comp", "KgLiveIdeal_comp", "AlimIdealAcum_comp",
             "FCR_Cum", "FCR_ideal", "CostoAcum", "CostoIdealComp", "GapCostoComp",
-            "ZonaNombre", "TipoStd", "Quintil"
+            "ZonaNombre", "TipoStd", "Quintil", "ReproductoraStd"
         ]
     )
 
@@ -685,31 +796,32 @@ def calcular_fcr_gaps_galpones(snap_df: pd.DataFrame, ideales_df: pd.DataFrame) 
         )
 
         filas.append({
-            "Granja":         str(row.get("GranjaID", row.get("Granja", "—"))),
-            "NombreGranja":   str(row.get("NombreGranja", "—")),
-            "Galpon":         row.get("Galpon", "—"),
-            "LoteCompleto":   row["LoteCompleto"],
-            "Edad":           edad_lote,
+            "Granja":           str(row.get("GranjaID", row.get("Granja", "—"))),
+            "NombreGranja":     str(row.get("NombreGranja", "—")),
+            "Galpon":           row.get("Galpon", "—"),
+            "LoteCompleto":     row["LoteCompleto"],
+            "Edad":             edad_lote,
 
-            "AvesVivas":      row.get("AvesVivas", np.nan),
-            "KgLive":         kg_live_real,
-            "PesoIdeal":      row.get("PesoIdeal_comp", np.nan),
-            "KgLiveIdeal":    row.get("KgLiveIdeal_comp", np.nan),
-            "PrecioKgReal":   precio_kg_real,
-            "AlimIdealAcum":  row.get("AlimIdealAcum_comp", np.nan),
+            "AvesVivas":        row.get("AvesVivas", np.nan),
+            "KgLive":           kg_live_real,
+            "PesoIdeal":        row.get("PesoIdeal_comp", np.nan),
+            "KgLiveIdeal":      row.get("KgLiveIdeal_comp", np.nan),
+            "PrecioKgReal":     precio_kg_real,
+            "AlimIdealAcum":    row.get("AlimIdealAcum_comp", np.nan),
 
-            "FCR_real":       round(float(fcr_real), 4) if pd.notna(fcr_real) else np.nan,
-            "FCR_ideal":      round(float(fcr_ideal), 4) if pd.notna(fcr_ideal) else np.nan,
-            "Gap_FCR":        round(float(gap_fcr), 4) if pd.notna(gap_fcr) else np.nan,
+            "FCR_real":         round(float(fcr_real), 4) if pd.notna(fcr_real) else np.nan,
+            "FCR_ideal":        round(float(fcr_ideal), 4) if pd.notna(fcr_ideal) else np.nan,
+            "Gap_FCR":          round(float(gap_fcr), 4) if pd.notna(gap_fcr) else np.nan,
 
-            "CostoReal":      costo_real,
-            "CostoIdeal":     costo_ideal,
-            "GapCosto":       gap_costo,
-            "GapCostoKg":     gap_costo_kg,
+            "CostoReal":        costo_real,
+            "CostoIdeal":       costo_ideal,
+            "GapCosto":         gap_costo,
+            "GapCostoKg":       gap_costo_kg,
 
-            "ZonaNombre":     row.get("ZonaNombre", np.nan),
-            "TipoStd":        row.get("TipoStd", np.nan),
-            "Quintil":        row.get("Quintil", np.nan),
+            "ZonaNombre":       row.get("ZonaNombre", np.nan),
+            "TipoStd":          row.get("TipoStd", np.nan),
+            "Quintil":          row.get("Quintil", np.nan),
+            "ReproductoraStd":  row.get("ReproductoraStd", np.nan),
         })
 
     return pd.DataFrame(filas)
@@ -762,13 +874,16 @@ def get_curva_ideal_promedio(
     tipo: str,
     quintil: str,
     ideales_df: pd.DataFrame,
-    edad_max: int | None = None
+    edad_max: int | None = None,
+    reproductora: str | None = None,
 ) -> pd.DataFrame:
-    sub = ideales_df[
-        (ideales_df["Zona_Nombre"] == zona) &
-        (ideales_df["TipoGranja"] == tipo) &
-        (ideales_df["Quintil"] == quintil)
-    ].copy()
+    sub = _filtrar_ideal_sub(
+        ideales_df=ideales_df,
+        zona=zona,
+        tipo=tipo,
+        quint=quintil,
+        reproductora=reproductora,
+    ).copy()
 
     if sub.empty:
         return pd.DataFrame()
@@ -819,6 +934,7 @@ def agrupar_granjalote(df):
         conv_col:        "last",
         "Granja":        "first",
         "NombreGranja":  "first" if "NombreGranja" in df.columns else "first",
+        "ReproductoraStd": "first" if "ReproductoraStd" in df.columns else "first",
         costo_col:       "max",
         "Edad":          "max",
     }
@@ -864,6 +980,8 @@ def agrupar_granjas_top10(df_granjalote, top_n=10):
 
     if "NombreGranja" in df_granjalote.columns:
         agg_dict["NombreGranja"] = "first"
+    if "ReproductoraStd" in df_granjalote.columns:
+        agg_dict["ReproductoraStd"] = "first"
     if "AlimAcumKg" in df_granjalote.columns:
         agg_dict["AlimAcumKg"] = "sum"
     if "Edad" in df_granjalote.columns:
@@ -883,6 +1001,7 @@ def agrupar_granjas_top10(df_granjalote, top_n=10):
         "Conv_GranjaLote_min":  "Conv_Min",
         "CostoAcum_sum":        "CostoTotal",
         "NombreGranja_first":   "NombreGranja",
+        "ReproductoraStd_first": "ReproductoraStd",
         "AlimAcumKg_sum":       "AlimTotal",
         "Edad_mean":            "EdadPromedio",
     }
