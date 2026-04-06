@@ -167,7 +167,7 @@ def render_sec05(lote_sel, SF, DF_FILTRADO):
 from dashboard_sec05 import render_sec05
 ```
 
-3. **Llamar en el layout:**
+3. **Llamar en el layout :**
 ```python
 with left:  # o with right:
     render_sec05(lote_sel, SF, DF_FILTRADO)
