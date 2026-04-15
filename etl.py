@@ -1,5 +1,3 @@
-ervisa y dime que hace este archivo 
-
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
@@ -934,6 +932,73 @@ def cruzar_brl_precios(df, precios_dia, promedio_lote):
 
 
 # ============================================================
+# PASO 8.5: CLASIFICACIÓN REPRODUCTORA / GUARDA / ETAPA
+# ============================================================
+def clasificar_reproductora_guarda_etapa(df):
+    df = df.copy()
+
+    # -----------------------------
+    # REPRODUCTORA (edad reproductora)
+    # -----------------------------
+    # Ajusta el nombre de la columna si es distinto
+    if "edad_reproductora" in df.columns:
+        df["Reproductora"] = np.select(
+            [
+                (df["edad_reproductora"] >= 28) & (df["edad_reproductora"] <= 34),
+                (df["edad_reproductora"] >= 35) & (df["edad_reproductora"] <= 50),
+                (df["edad_reproductora"] >= 51)
+            ],
+            ["Joven", "Adulta", "Vieja"],
+            default=np.nan
+        )
+    else:
+        df["Reproductora"] = np.nan
+
+    # -----------------------------
+    # GUARDA (días de guarda)
+    # -----------------------------
+    # Ajusta el nombre si usas "dias_guarda" o "ponderado_dias_guarda"
+    if "dias_guarda" in df.columns:
+        guarda_base = df["dias_guarda"]
+    elif "ponderado_dias_guarda" in df.columns:
+        guarda_base = df["ponderado_dias_guarda"]
+    else:
+        guarda_base = None
+
+    if guarda_base is not None:
+        df["Guarda"] = np.select(
+            [
+                (guarda_base >= 3) & (guarda_base <= 6),
+                (guarda_base >= 7) & (guarda_base <= 12),
+                (guarda_base >= 13)
+            ],
+            ["Optima", "Moderada", "Critica"],
+            default=np.nan
+        )
+    else:
+        df["Guarda"] = np.nan
+
+    # -----------------------------
+    # ETAPA (edad del lote)
+    # -----------------------------
+    if "Edad" in df.columns:
+        df["etapa"] = np.select(
+            [
+                (df["Edad"] >= 1) & (df["Edad"] <= 14),
+                (df["Edad"] >= 15) & (df["Edad"] <= 28),
+                (df["Edad"] >= 29) & (df["Edad"] <= 35),
+                (df["Edad"] >= 36)
+            ],
+            [1, 2, 3, 0],
+            default=np.nan
+        )
+    else:
+        df["etapa"] = np.nan
+
+    return df
+
+
+# ============================================================
 # PASO 9: PREPARAR SALIDA
 # ============================================================
 def preparar_salida(df):
@@ -1006,9 +1071,9 @@ def main():
         kri_ali = transformar_kri_alimento()
         precios_dia, promedio_lote = calcular_precios_ponderados(kri_ali)
         df = cruzar_brl_precios(df, precios_dia, promedio_lote)
+        df = clasificar_reproductora_guarda_etapa(df)
 
-        df_final = preparar_salida(df)
-
+        # ============================================================
         print("\n[EXPORTANDO] Generando archivo Excel...")
         with pd.ExcelWriter(OUT_XLSX, engine="openpyxl") as writer:
             df_final.to_excel(writer, sheet_name="produccion", index=False)
