@@ -4,8 +4,9 @@
 # ──────────────────────────────────────────────────────────────
 
 # ── Archivos de datos ─────────────────────────────────────────
-MAIN_FILE         = "produccion_mes_actual_simulada_abiertos.xlsx"
-BENCH_FILE = "LOTES_IDEALES_DASHBOARD_COMPATIBLE.xlsx"
+MAIN_FILE         = "etl/data/produccion_mes_actual.xlsx"
+BENCH_FILE        = "data/LOTES_IDEALES_DASHBOARD_COMPATIBLE.xlsx"
+MODEL_FILE        = "models/modelo_rf_avicola.joblib"
 EDAD_MIN_ANALISIS = 7
 
 # ── Brand tokens ─────────────────────────────────────────────

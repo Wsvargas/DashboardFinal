@@ -2,13 +2,14 @@ import os
 import streamlit as st
 from datetime import datetime
 
-# ── Módulos propios ───────────────────────────────────────────
+
+# ── Módulos propios  ───────────────────────────────────────────
 from config import (
     MAIN_FILE, BENCH_FILE, RED, BLACK, BG, CARD, BORDER, TEXT, MUTED, GREEN, AMBER, BLUE,
 )
-from helpers import md
-from styles import inject_css
-from data_loader import (
+from core.helpers import md
+from core.styles import inject_css
+from core.data_loader import (
     load_and_prepare,
     load_ideales,
     build_snapshot_activos,
@@ -16,11 +17,11 @@ from data_loader import (
 )
 
 # ── Módulos del dashboard ─────────────────────────────────────
-from dashboard_kpis import render_kpis_globales
-from dashboard_sec01 import render_sec01
-from dashboard_sec02 import render_sec02
-from dashboard_sec03 import render_sec03
-from dashboard_sec04 import render_sec04
+from dashboard.kpis  import render_kpis_globales
+from dashboard.sec01 import render_sec01
+from dashboard.sec02 import render_sec02
+from dashboard.sec03 import render_sec03
+from dashboard.sec04 import render_sec04
 
 
 # ──────────────────────────────────────────────────────────────
@@ -50,7 +51,7 @@ def go_dashboard():
 
 
 if st.session_state["page"] == "predictiva":
-    import app_predictor_operativo
+    from predictor import operativo as app_predictor_operativo
     app_predictor_operativo.render(go_dashboard=go_dashboard)
     st.stop()
 
@@ -64,7 +65,7 @@ inject_css()
 # ──────────────────────────────────────────────────────────────
 @st.cache_resource(show_spinner=False)
 def get_predictor_cached(model_path: str, model_mtime: float):
-    from model_predictor import cargar_predictor
+    from core.model_predictor import cargar_predictor
     return cargar_predictor(model_path)
 
 # ──────────────────────────────────────────────────────────────
