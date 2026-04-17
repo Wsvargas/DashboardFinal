@@ -34,7 +34,7 @@ st.set_page_config(
 )
 
 # ──────────────────────────────────────────────────────────────
-# ROUTER simple (dashboard / predictiva)
+# ROUTER simple (dashboard / predictiva operativa)
 # ──────────────────────────────────────────────────────────────
 if "page" not in st.session_state:
     st.session_state["page"] = "dashboard"
