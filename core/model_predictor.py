@@ -1,463 +1,400 @@
 """
-Model Predictor para PRONACA Dashboard v13
-============================================
+Model Predictor — PRONACA Dashboard v16
+========================================
+Usa modelo CatBoost de curva futura.
 
-Responsabilidades:
-  1. Cargar modelo Random Forest entrenado desde joblib
-  2. Extraer features dinámicamente del historial del lote
-  3. Proyectar iterativamente día a día (no solo peso)
-  4. Aplicar restricción de monotonía
-  5. Retornar curva completa para visualización
+Arquitectura CORRECTA (no iterativa):
+  - Input : snapshot del lote HOY + día objetivo
+  - Output: delta de peso predicho para cada día futuro
+  - Una sola llamada batch para toda la curva
+
+El modelo predice DELTA (ganancia de peso desde hoy),
+no el peso absoluto. Se construye una fila por cada día
+objetivo y se hace una predicción batch de toda la curva.
 
 Uso:
-  from model_predictor import cargar_predictor
-  
-  predictor = cargar_predictor("modelo_rf_avicola.joblib")
-  
-  res = predictor.proyectar_curva(
-      hist_lote=hist_df,
-      target_edad=40,
-      enforce_monotonic="isotonic"
-  )
-  
-  if not res.get("error"):
-      df_prediccion = res["df"]
-      peso_d40 = res["peso_d40"]
-      edad_actual = res["edad_actual"]
+  predictor = cargar_predictor("models/modelo_curva_futura_catboost.joblib")
+  res = predictor.proyectar_curva(hist_lote=df, target_edad=35)
+  if not res["error"]:
+      df_curva = res["df"]   # columnas: Dia, Peso_pred_kg
 """
 
 import os
+import json
 import numpy as np
 import pandas as pd
 import joblib
-from typing import Dict, Optional, Any
-from sklearn.isotonic import IsotonicRegression
+from datetime import datetime
+from typing import Any, Dict, Optional
 
+
+# ──────────────────────────────────────────────────────────────
+# HELPERS
+# ──────────────────────────────────────────────────────────────
+
+def _stage_from_age(age: int) -> int:
+    """Etapa biológica: 1=inicio, 2=crecimiento, 3=pre-acabado, 0=acabado."""
+    a = int(age)
+    if 1 <= a <= 14:  return 1
+    if 15 <= a <= 28: return 2
+    if 29 <= a <= 35: return 3
+    return 0
+
+
+def _season_features(dt: Optional[datetime] = None) -> Dict[str, int]:
+    """Deriva trimestre e Invierno desde una fecha (Ecuador: rainy=Nov-Apr)."""
+    if dt is None:
+        dt = datetime.today()
+    m = dt.month
+    return {
+        "T1":      1 if m in (1, 2, 3)   else 0,
+        "T2":      1 if m in (4, 5, 6)   else 0,
+        "T3":      1 if m in (7, 8, 9)   else 0,
+        "T4":      1 if m in (10, 11, 12) else 0,
+        "Invierno": 1 if m in (11, 12, 1, 2, 3, 4) else 0,
+    }
+
+
+def _add_engineered(df: pd.DataFrame) -> pd.DataFrame:
+    """Feature engineering que el modelo espera en inferencia."""
+    df = df.copy()
+    df["Edad_actual2"]          = df["Edad_actual"]    ** 2
+    df["Edad_objetivo2"]        = df["Edad_objetivo"]  ** 2
+    df["Horizonte_dias2"]       = df["Horizonte_dias"] ** 2
+    df["Peso_actual_x_Horizonte"] = df["Peso_actual"]   * df["Horizonte_dias"]
+    df["Edad_actual_x_Horizonte"] = df["Edad_actual"]   * df["Horizonte_dias"]
+    if "Aves Netas" in df.columns:
+        df["Aves_Netas_x_Horizonte"] = (
+            pd.to_numeric(df["Aves Netas"], errors="coerce") * df["Horizonte_dias"]
+        )
+    return df
+
+
+def _preprocess(df: pd.DataFrame, artifact: Dict, feature_cols: list) -> pd.DataFrame:
+    """Aplica imputación de medianas y encoding según el artefacto de entrenamiento."""
+    cat_cols     = artifact.get("cat_cols", [])
+    numeric_cols = artifact.get("numeric_cols", [])
+    medians      = artifact.get("medians", {})
+
+    df = df.copy()
+
+    for c in cat_cols:
+        if c not in df.columns:
+            df[c] = "MISSING"
+        df[c] = (
+            df[c].fillna("MISSING")
+                 .astype(str)
+                 .replace({"nan": "MISSING", "None": "MISSING", "<NA>": "MISSING"})
+        )
+
+    for c in numeric_cols:
+        if c not in df.columns:
+            df[c] = medians.get(c, 0.0)
+        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(medians.get(c, 0.0))
+
+    # Garantizar que todas las columnas del modelo existan
+    for c in feature_cols:
+        if c not in df.columns:
+            df[c] = medians.get(c, 0.0)
+
+    return df[feature_cols]
+
+
+# ──────────────────────────────────────────────────────────────
+# CLASE PRINCIPAL
+# ──────────────────────────────────────────────────────────────
 
 class Predictor:
     """
-    Encapsulador del modelo RandomForest para proyecciones avícolas
-    
+    Encapsula el modelo CatBoost de curva futura.
+
     Attributes:
-        model_path (str): Ruta al archivo joblib
-        model: Modelo RandomForest cargado (None si no existe)
-        features (list): Lista de features que el modelo espera
-        max_edad (int): Edad máxima de predicción (generalmente 40)
-        perfil_alimento (pd.Series): Perfil mediana de alimento por día
+        model            : CatBoostRegressor cargado
+        feature_cols     : lista de columnas que el modelo espera
+        current_snapshot_cols : columnas del estado actual del lote
+        prep_artifact    : artefacto de preprocesamiento (medianas, encoders)
+        max_edad         : día máximo de predicción
     """
-    
+
     def __init__(self, model_path: str):
-        """
-        Carga el modelo y metadatos desde joblib
-        
-        Args:
-            model_path (str): Ruta a modelo_rf_avicola.joblib
-        """
-        self.model_path = model_path
-        self.model = None
-        self.features = []
-        self.max_edad = 40
-        self.perfil_alimento = None
-        
-        if os.path.exists(model_path):
-            try:
-                bundle = joblib.load(model_path)
-                self.model = bundle.get("model")
-                self.features = bundle.get("features", [])
-                self.max_edad = bundle.get("max_edad", 40)
-                self.perfil_alimento = bundle.get("perfil_alimento_mediana")
-                print(f"✅ Modelo cargado exitosamente: {len(self.features)} features")
-                print(f"   Features: {', '.join(self.features[:5])}{'...' if len(self.features) > 5 else ''}")
-            except Exception as e:
-                print(f"❌ Error cargando modelo: {e}")
-                self.model = None
-        else:
-            print(f"⚠️ Archivo no encontrado: {model_path}")
-    
-    def _get_snapshot_features(self, hist_lote: pd.DataFrame) -> Dict[str, float]:
-        """
-        Extrae TODAS las variables necesarias del último registro del lote
-        
-        El modelo fue entrenado con múltiples features (no solo peso):
-        - X4=Edad
-        - Edad^2
-        - alimento acumulado
-        - conversión alimenticia
-        - mortalidad
-        - zona
-        - tipo granja
-        - quintil
-        - etc.
-        
-        Args:
-            hist_lote (pd.DataFrame): DataFrame histórico del lote (ordenado por Edad)
-        
-        Returns:
-            Dict[str, float]: Diccionario con todos los features mapeados
-        """
-        # Tomar el último registro válido (más reciente)
-        ultimo = hist_lote.iloc[-1]
-        
-        snapshot = {}
-        
-        # Iterar sobre TODOS los features que el modelo espera
-        for feat in self.features:
-            if feat in hist_lote.columns:
-                val = ultimo[feat]
-                # Convertir a float, manejo de NaN
-                try:
-                    snapshot[feat] = float(val) if pd.notna(val) else 0.0
-                except (ValueError, TypeError):
-                    snapshot[feat] = 0.0
-            else:
-                # Feature no presente en los datos → usar 0.0
-                snapshot[feat] = 0.0
-        
-        return snapshot
-    
-    def _ensure_columns_for_model(self, hist_lote: pd.DataFrame) -> pd.DataFrame:
-        """
-        Asegura que existan las columnas que el modelo espera (self.features),
-        creando derivados comunes si vienen con otros nombres o en texto.
-        """
-        h = hist_lote.copy()
+        self.model_path  = model_path
+        self.model       = None
+        self.model_q10   = None
+        self.model_q90   = None
+        self.feature_cols         = []
+        self.current_snapshot_cols = []
+        self.prep_artifact        = {}
+        self.max_edad             = 44
 
-        # ─────────────────────────────────────────
-        # 1) QUINTIL_num (si el modelo lo usa)
-        # ─────────────────────────────────────────
-        if "Quintil_num" in self.features and "Quintil_num" not in h.columns:
-            src = None
-            for c in ("Quintil", "quintil", "Quintil_Area_Crianza"):
-                if c in h.columns:
-                    src = c
-                    break
+        if not os.path.exists(model_path):
+            print(f"[WARN] Modelo no encontrado: {model_path}")
+            return
 
-            if src is not None:
-                q = (
-                    h[src].astype(str).str.upper().str.strip()
-                    .str.extract(r"(Q[1-5])", expand=False)
-                    .fillna("Q5")
-                )
-                h["Quintil_num"] = q.map({"Q1": 1, "Q2": 2, "Q3": 3, "Q4": 4, "Q5": 5}).astype(float)
-            else:
-                # default seguro
-                h["Quintil_num"] = 5.0
-
-        # ─────────────────────────────────────────
-        # 2) ZONA (si el modelo la usa)
-        #   Ajusta el mapeo si en tu entrenamiento fue distinto.
-        # ─────────────────────────────────────────
-        if "Zona" in self.features and "Zona" not in h.columns:
-            if "ZonaNombre" in h.columns:
-                zn = h["ZonaNombre"].astype(str).str.upper()
-                # ejemplo: 1=BUCAY, 2=SANTO DOMINGO
-                h["Zona"] = np.where(zn.str.contains("BUC"), 1.0,
-                            np.where(zn.str.contains("SANTO"), 2.0, 0.0))
-            elif "LoteCompleto" in h.columns:
-                pref = h["LoteCompleto"].astype(str).str[:3].str.upper()
-                h["Zona"] = pref.map({"BUC": 1.0, "STO": 2.0}).fillna(0.0).astype(float)
-            else:
-                h["Zona"] = 0.0
-
-        # ─────────────────────────────────────────
-        # 3) X4=Edad y Edad^2 (si el modelo las usa)
-        # ─────────────────────────────────────────
-        if "X4=Edad" in self.features and "X4=Edad" not in h.columns and "Edad" in h.columns:
-            h["X4=Edad"] = pd.to_numeric(h["Edad"], errors="coerce")
-
-        if "Edad^2" in self.features and "Edad^2" not in h.columns:
-            base = "X4=Edad" if "X4=Edad" in h.columns else ("Edad" if "Edad" in h.columns else None)
-            if base is not None:
-                h["Edad^2"] = pd.to_numeric(h[base], errors="coerce") ** 2
-
-        # ─────────────────────────────────────────
-        # 4) alimento acumulado (si el modelo lo usa)
-        # ─────────────────────────────────────────
-        if "alimento acumulado" in self.features and "alimento acumulado" not in h.columns:
-            for c in ("AlimAcumKg", "Alimento_acumulado_kg", "AlimAcum", "alim_acum"):
-                if c in h.columns:
-                    h["alimento acumulado"] = pd.to_numeric(h[c], errors="coerce")
-                    break
-            if "alimento acumulado" not in h.columns:
-                h["alimento acumulado"] = 0.0
-
-        # ─────────────────────────────────────────
-        # 5) Forzar numéricos para TODO lo que el modelo espera
-        # ─────────────────────────────────────────
-        for f in self.features:
-            if f in h.columns:
-                h[f] = pd.to_numeric(h[f], errors="coerce").fillna(0.0)
-
-        return h
-        
-    def _interpolar_alimento(self, dia: int, alim_hoy: float, edad_hoy: int) -> float:
-        """
-        Estima alimento acumulado para un día futuro
-        basándose en el perfil histórico
-        
-        Estrategia:
-          - Si hay perfil_alimento (mediana por día) → usar ese
-          - Si no → extrapolación lineal simple
-        
-        Args:
-            dia (int): Día futuro (28, 29, 30, ..., 40)
-            alim_hoy (float): Alimento acumulado al día actual (ej: 1250 kg)
-            edad_hoy (int): Edad actual (ej: 28)
-        
-        Returns:
-            float: Alimento acumulado estimado para el día futuro
-        """
-        if self.perfil_alimento is None or alim_hoy is None or alim_hoy == 0:
-            # Estrategia simple: asumir consumo lineal
-            consumo_diario = alim_hoy / max(edad_hoy, 1)
-            return alim_hoy + consumo_diario * (dia - edad_hoy)
-        
-        # Usar perfil si está disponible
         try:
-            if dia in self.perfil_alimento.index:
-                perfil_dia = float(self.perfil_alimento.loc[dia])
-                perfil_hoy = float(self.perfil_alimento.loc[edad_hoy])
-                if perfil_hoy > 0:
-                    factor = alim_hoy / perfil_hoy
-                    return perfil_dia * factor
-        except Exception:
-            pass
-        
-        # Fallback: consumo diario lineal
-        consumo_diario = alim_hoy / max(edad_hoy, 1)
-        return alim_hoy + consumo_diario * (dia - edad_hoy)
-    
-    def _aplicar_restricciones(self, pesos: np.ndarray, metodo: str = "isotonic") -> np.ndarray:
+            package = joblib.load(model_path)
+            self.model                 = package["model"]
+            self.model_q10             = package.get("model_q10")
+            self.model_q90             = package.get("model_q90")
+            self.feature_cols          = package["feature_cols"]
+            self.current_snapshot_cols = package.get("current_snapshot_cols", [])
+            self.prep_artifact         = package.get("prep_artifact", {})
+            banda = " + banda q10-q90" if self.model_q10 is not None else ""
+            print(f"[OK] Modelo CatBoost cargado - {len(self.feature_cols)} features{banda}")
+        except Exception as e:
+            print(f"[ERROR] Error cargando modelo: {e}")
+            self.model = None
+
+    # ── Construcción del snapshot ──────────────────────────────
+    def _snapshot_from_hist(self, hist_lote: pd.DataFrame) -> Dict[str, Any]:
         """
-        Asegura que los pesos predichos sean monótonamente crecientes
-        
-        Un pollo NO pierde peso en crianza normal
-        
-        Args:
-            pesos (np.ndarray): Array de pesos predichos [2.10, 2.25, 2.48, 2.41, 2.55, ...]
-            metodo (str): "cummax" = máximo acumulado
-                         "isotonic" = regresión isotónica (más suave)
-        
-        Returns:
-            np.ndarray: Array ajustado [2.10, 2.25, 2.48, 2.48, 2.55, ...]
+        Extrae las features del estado actual del lote.
+        Soporta tanto el modelo externo (PRONACA 2) como el modelo
+        reentrenado con el ETL propio (nombres distintos).
         """
-        if metodo == "cummax":
-            return np.maximum.accumulate(pesos)
-        
-        elif metodo == "isotonic":
-            # Isotonic Regression: ajusta para que sea monótonamente creciente
-            dias = np.arange(len(pesos), dtype=float)
-            iso = IsotonicRegression(increasing=True, out_of_bounds="clip")
-            return iso.fit_transform(dias, pesos)
-        
-        else:
-            return pesos
-    
+        ultimo = hist_lote.iloc[-1]
+
+        def safe(col, default=0.0):
+            v = ultimo.get(col, default)
+            try:
+                return float(v) if pd.notna(v) else default
+            except (TypeError, ValueError):
+                return default
+
+        def safe_str(col, *fallbacks, default="MISSING"):
+            for c in (col, *fallbacks):
+                v = ultimo.get(c)
+                if v is not None and pd.notna(v) and str(v).strip() not in ("nan", "None", ""):
+                    return str(v).strip()
+            return default
+
+        snap = {}
+
+        # ── Zona / tipo ───────────────────────────────────────
+        zona = str(ultimo.get("ZonaNombre", "")).upper()
+        snap["BUCAY"]         = 1 if "BUCAY" in zona else 0
+        snap["Granja Propia"] = 1 if str(ultimo.get("TipoStd", "")).upper() == "PROPIA" else 0
+        snap["Granja_Propia"] = snap["Granja Propia"]   # nombre modelo ETL propio
+
+        # ── Reproductora / Guarda ─────────────────────────────
+        repro = safe_str("ReproductoraStd", "Reproductora", default="MISSING")
+        snap["Reproductora"]               = repro
+        snap["Guarda"]                     = safe_str("Guarda")
+        snap["ponderado_edad_reproductora"] = safe("ponderado_edad_reproductora")
+        snap["ponderado_dias_guarda"]       = safe("ponderado_dias_guarda")
+
+        # ── Aves ──────────────────────────────────────────────
+        aves_vivas = safe("AvesVivas")
+        snap["Aves Netas"]   = aves_vivas        # modelo externo
+        snap["Aves_Netas"]   = aves_vivas        # modelo ETL propio
+        snap["Aves_Iniciales"] = safe("Aves_Iniciales", aves_vivas)
+
+        # ── Mortalidad ────────────────────────────────────────
+        mort_ac = safe("MortalidadDescarte_Acumulado")
+        snap["MORTALIDAD + DESCARTE"] = mort_ac  # modelo externo
+        snap["mort_acumulado"]        = mort_ac  # modelo ETL propio
+        snap["mort_diario"]           = safe("MortalidadDescarte_Diario")
+
+        # ── Alimento / FCR ────────────────────────────────────
+        alim_ac = safe("AlimAcumKg")
+        alim_d  = safe("_alim_dia")
+        snap["alimento acumulado"]  = alim_ac    # modelo externo
+        snap["alimento_acumulado"]  = alim_ac    # modelo ETL propio
+        snap["alimento diario"]     = alim_d     # modelo externo
+        snap["alimento_diario"]     = alim_d     # modelo ETL propio
+
+        # FCR: primero desde datos calculados por data_loader, luego ETL directo
+        fcr = safe("FCR_Cum")
+        if fcr == 0.0:
+            fcr = safe("conversio alimenticia")
+        snap["FCR_actual"] = fcr
+
+        # ── Quintil / Edad^2 ──────────────────────────────────
+        snap["Quintil_Area_Crianza"] = safe_str("Quintil", default="Q3")
+        snap["Edad^2"]               = safe("Edad") ** 2
+
+        # ── Raza / densidad / incremento diario ───────────────
+        snap["porcentaje_raza_RAP95"] = safe("porcentaje_raza_RAP95")
+        snap["porcentaje_raza_C500SF"] = safe("porcentaje_raza_C500SF")
+        snap["aves_m2"]    = safe("aves_m2")
+        snap["Peso_diario"] = safe("Peso_diario")
+
+        # ── Sexo / color (modelo externo, ausentes en ETL propio) ─
+        snap["MACHO"]    = safe("MACHO",    0.0)
+        snap["MIXTO"]    = safe("MIXTO",    0.0)
+        snap["AMARILLO"] = safe("AMARILLO", 0.0)
+
+        # ── Estacionalidad ────────────────────────────────────
+        snap.update(_season_features())
+
+        # ── Features restantes → NaN (prep_artifact usa medianas) ─
+        for c in self.current_snapshot_cols:
+            if c not in snap:
+                snap[c] = np.nan
+
+        return snap
+
+    # ── Proyección principal ───────────────────────────────────
     def proyectar_curva(
         self,
         hist_lote: pd.DataFrame,
-        target_edad: int = 40,
-        enforce_monotonic: str = "isotonic",
+        target_edad: int = 35,
+        **_ignored,   # tolera parametros legacy (ej. enforce_monotonic)
     ) -> Dict[str, Any]:
         """
-        FUNCIÓN PRINCIPAL: Proyecta la curva de crecimiento hasta target_edad
-        
-        Flujo:
-          1. Extrae snapshot (TODAS las variables) del último día del lote
-          2. Para cada día de hoy hasta target_edad:
-             a. Actualiza variables (edad, edad^2, alimento estimado)
-             b. Pasa al modelo RandomForest → obtiene peso predicho
-             c. Almacena en lista
-          3. Aplica restricción de monotonía
-          4. Retorna DataFrame con curva completa
-        
-        Args:
-            hist_lote (pd.DataFrame): DataFrame del lote (debe tener PesoFinal ordenado por Edad)
-            target_edad (int): Día final de proyección (ej: 40)
-            enforce_monotonic (str): "isotonic", "cummax", o None
-        
-        Returns:
-            Dict[str, Any]: Diccionario con:
-              - "error" (str o None): Mensaje de error si hay problema
-              - "df" (pd.DataFrame): DataFrame con [Dia, Peso_pred_kg, Peso_pred_g]
-              - "edad_actual" (int): Última edad en historial
-              - "peso_d40" (float): Peso predicho para target_edad
+        Proyecta la curva de peso desde el día actual hasta target_edad.
+
+        Una sola llamada batch al modelo (no iterativa):
+          Para cada día objetivo d en [edad_actual+1 .. target_edad]:
+            input  = (Edad_actual=hoy, Edad_objetivo=d, Horizonte=d-hoy, snapshot)
+            output = delta_peso predicho para el día d
+
+          Peso_d = Peso_actual + delta_d  (con restricción monotónica)
+
+        Returns dict con:
+          error       : None o mensaje de error
+          df          : DataFrame con columnas [Dia, Peso_pred_kg]
+          edad_actual : int
+          peso_d35    : float — peso predicho en target_edad
         """
+        _ERR = {
+            "error": None, "df": pd.DataFrame(), "edad_actual": None,
+            "peso_d35": None, "peso_d35_lo": None, "peso_d35_hi": None,
+        }
+
+        if self.model is None:
+            return {**_ERR, "error": "Modelo no cargado"}
+
+        if hist_lote is None or hist_lote.empty:
+            return {**_ERR, "error": "Historial vacío"}
+
+        hist = hist_lote.sort_values("Edad").copy()
+        hist = hist[hist["PesoFinal"].notna() & (hist["PesoFinal"] > 0)]
+        if hist.empty:
+            return {**_ERR, "error": "Sin registros de peso válidos"}
+
         try:
-            # ────────────────────────────────────────────────────────────
-            # VALIDACIONES BÁSICAS
-            # ────────────────────────────────────────────────────────────
-            if self.model is None:
-                return {
-                    "error": "Modelo no cargado",
-                    "df": None,
-                    "edad_actual": None,
-                    "peso_d40": None
+            ultimo       = hist.iloc[-1]
+            edad_actual  = int(float(ultimo["Edad"]))
+            peso_actual  = float(ultimo["PesoFinal"])
+            target_edad  = max(target_edad, edad_actual)
+            target_edad  = min(target_edad, self.max_edad)
+
+            snap = self._snapshot_from_hist(hist)
+
+            # ── Construir batch: una fila por día objetivo ────────
+            rows = []
+            for age_obj in range(edad_actual + 1, target_edad + 1):
+                rec = {
+                    "Edad_actual":    edad_actual,
+                    "Edad_objetivo":  age_obj,
+                    "Horizonte_dias": age_obj - edad_actual,
+                    "Peso_actual":    peso_actual,
+                    "etapa_actual":   _stage_from_age(edad_actual),
+                    "etapa_objetivo": _stage_from_age(age_obj),
                 }
-            
-            if hist_lote.empty:
+                for c in self.current_snapshot_cols:
+                    rec[c] = snap.get(c, np.nan)
+                rows.append(rec)
+
+            # Si ya está en o pasó el día objetivo
+            if not rows:
+                df_out = pd.DataFrame({"Dia": [edad_actual], "Peso_pred_kg": [peso_actual]})
                 return {
-                    "error": "Historial vacío",
-                    "df": None,
-                    "edad_actual": None,
-                    "peso_d40": None
+                    "error": None, "df": df_out, "edad_actual": edad_actual,
+                    "peso_d35": peso_actual, "peso_d35_lo": None, "peso_d35_hi": None,
                 }
-            
-            # ────────────────────────────────────────────────────────────
-            # PREPARAR DATOS
-            # ────────────────────────────────────────────────────────────
-            
-            # ✅ asegurar columnas que el modelo necesita (Quintil_num, Zona, etc.)
-            hist_lote = self._ensure_columns_for_model(hist_lote)
-            
-            # Último registro disponible
-            ultimo_registro = hist_lote.iloc[-1]
-            edad_actual = int(ultimo_registro["Edad"])
-            
-            # Extraer SNAPSHOT de variables
-            snapshot = self._get_snapshot_features(hist_lote)
-            print("[DEBUG] snapshot Quintil_num =", snapshot.get("Quintil_num", None))
-            print("[DEBUG] snapshot Zona       =", snapshot.get("Zona", None))
-            
-            # Obtener alimento acumulado del último registro
-            alim_hoy = None
-            for col in ["AlimAcumKg", "alimento acumulado", "Alimento_acumulado_kg", 
-                        "AlimAcum", "alim_acum"]:
-                if col in hist_lote.columns:
-                    try:
-                        alim_hoy = float(ultimo_registro[col])
-                        if pd.notna(alim_hoy) and alim_hoy > 0:
-                            break
-                    except (ValueError, TypeError):
-                        pass
-            
-            # ────────────────────────────────────────────────────────────
-            # PROYECTAR DÍA A DÍA
-            # ────────────────────────────────────────────────────────────
-            
-            pesos_predichos = []
-            filas_resultado = []
-            
-            for dia in range(edad_actual, min(target_edad + 1, self.max_edad + 1)):
-                # Copiar snapshot y actualizar variables
-                fila_pred = dict(snapshot)
-                
-                # ⭐ ACTUALIZAR EDAD (variable continua)
-                fila_pred["X4=Edad"] = float(dia)
-                
-                # ⭐ ACTUALIZAR EDAD^2 (variable derivada)
-                if "Edad^2" in self.features:
-                    fila_pred["Edad^2"] = float(dia ** 2)
-                
-                # ⭐ ESTIMAR ALIMENTO ACUMULADO
-                if "alimento acumulado" in self.features and alim_hoy is not None:
-                    fila_pred["alimento acumulado"] = self._interpolar_alimento(
-                        dia, alim_hoy, edad_actual
-                    )
-                
-                # Preparar DataFrame para predicción (solo features del modelo)
-                X_pred = pd.DataFrame([{f: fila_pred.get(f, 0.0) for f in self.features}])
-                
-                # Predicción del modelo
-                peso_kg = float(self.model.predict(X_pred)[0])
-                pesos_predichos.append(peso_kg)
-                
-                filas_resultado.append({
-                    "Dia": int(dia),
-                    "Edad": int(dia),
-                    "Peso_pred_kg_raw": float(peso_kg),
-                    "Peso_pred_g_raw": float(peso_kg * 1000),
-                })
-            
-            # ────────────────────────────────────────────────────────────
-            # CREAR DATAFRAME
-            # ────────────────────────────────────────────────────────────
-            
-            df_curve = pd.DataFrame(filas_resultado)
-            
-            # ────────────────────────────────────────────────────────────
-            # APLICAR RESTRICCIÓN DE MONOTONÍA
-            # ────────────────────────────────────────────────────────────
-            
-            if enforce_monotonic and len(pesos_predichos) > 0:
-                pesos_ajustados = self._aplicar_restricciones(
-                    np.array(pesos_predichos),
-                    metodo=enforce_monotonic
+
+            curve_df = pd.DataFrame(rows)
+            curve_df = _add_engineered(curve_df)
+            X        = _preprocess(curve_df, self.prep_artifact, self.feature_cols)
+
+            # ── Predicción de deltas ──────────────────────────────
+            pred_delta   = self.model.predict(X)
+            pred_weights = peso_actual + np.array(pred_delta, dtype=float)
+
+            # No puede bajar del peso actual, y debe ser monotónica
+            pred_weights = np.maximum(pred_weights, peso_actual)
+            pred_weights = np.maximum.accumulate(pred_weights)
+
+            # ── Suavizado PCHIP para visualización ────────────────
+            # Los árboles producen escalones; interpolamos sobre puntos
+            # clave cada 7 días + inicio + fin para obtener curva suave.
+            # El valor final (peso_d35) se preserva exactamente.
+            dias_pred = np.array(range(edad_actual + 1, target_edad + 1))
+            if len(dias_pred) > 4:
+                from scipy.interpolate import PchipInterpolator
+                # Anclas: día actual + cada 7 días + último día
+                anclas_idx = (
+                    [0]
+                    + [i for i, d in enumerate(dias_pred) if (d - edad_actual) % 7 == 0]
                 )
-                df_curve["Peso_pred_kg"] = pesos_ajustados
-                df_curve["Peso_pred_g"] = (pesos_ajustados * 1000).round(0).astype(int)
-            else:
-                df_curve["Peso_pred_kg"] = df_curve["Peso_pred_kg_raw"]
-                df_curve["Peso_pred_g"] = df_curve["Peso_pred_g_raw"].round(0).astype(int)
-            
-            # ────────────────────────────────────────────────────────────
-            # EXTRAER PESO PARA target_edad
-            # ────────────────────────────────────────────────────────────
-            
-            df_target = df_curve[df_curve["Dia"] == target_edad]
-            if not df_target.empty:
-                peso_d40 = float(df_target.iloc[0]["Peso_pred_kg"])
-            else:
-                # Si target_edad está fuera de rango, tomar el último
-                peso_d40 = float(df_curve.iloc[-1]["Peso_pred_kg"])
-            
-            # ────────────────────────────────────────────────────────────
-            # RETORNAR RESULTADO
-            # ────────────────────────────────────────────────────────────
-            
+                if (len(dias_pred) - 1) not in anclas_idx:
+                    anclas_idx.append(len(dias_pred) - 1)
+                anclas_idx = sorted(set(anclas_idx))
+                dias_ancla  = dias_pred[anclas_idx]
+                pesos_ancla = pred_weights[anclas_idx]
+                interp = PchipInterpolator(dias_ancla, pesos_ancla, extrapolate=False)
+                pred_smooth = interp(dias_pred)
+                # Garantizar monotónico y ≥ peso_actual tras suavizado
+                pred_smooth = np.maximum(pred_smooth, peso_actual)
+                pred_smooth = np.maximum.accumulate(pred_smooth)
+                # Fijar el último punto exactamente al predicho
+                pred_smooth[-1] = pred_weights[-1]
+                pred_weights = pred_smooth
+
+            # ── Banda de predicción q10-q90 (si el modelo la trae) ─
+            banda_lo = banda_hi = None
+            if self.model_q10 is not None and self.model_q90 is not None:
+                try:
+                    w_q10 = peso_actual + np.array(self.model_q10.predict(X), dtype=float)
+                    w_q90 = peso_actual + np.array(self.model_q90.predict(X), dtype=float)
+
+                    banda_lo = np.minimum(w_q10, w_q90)
+                    banda_hi = np.maximum(w_q10, w_q90)
+
+                    # Coherencia biológica y con la curva central
+                    banda_lo = np.maximum(banda_lo, peso_actual)
+                    banda_lo = np.maximum.accumulate(banda_lo)
+                    banda_hi = np.maximum.accumulate(np.maximum(banda_hi, peso_actual))
+                    banda_lo = np.minimum(banda_lo, pred_weights)
+                    banda_hi = np.maximum(banda_hi, pred_weights)
+                except Exception:
+                    banda_lo = banda_hi = None
+
+            # ── Resultado incluyendo día actual ───────────────────
+            dias   = [edad_actual] + list(range(edad_actual + 1, target_edad + 1))
+            pesos  = [peso_actual] + list(pred_weights)
+
+            df_out = pd.DataFrame({"Dia": dias, "Peso_pred_kg": pesos})
+            df_out["Edad"]          = df_out["Dia"]
+            df_out["Peso_pred_g"]   = (df_out["Peso_pred_kg"] * 1000).round(0).astype(int)
+
+            peso_final = float(pred_weights[-1]) if len(pred_weights) > 0 else peso_actual
+            peso_lo = peso_hi = None
+
+            if banda_lo is not None:
+                df_out["Peso_pred_q10_kg"] = [peso_actual] + list(banda_lo)
+                df_out["Peso_pred_q90_kg"] = [peso_actual] + list(banda_hi)
+                peso_lo = float(banda_lo[-1])
+                peso_hi = float(banda_hi[-1])
+
             return {
-                "error": None,
-                "df": df_curve[["Dia", "Peso_pred_kg", "Peso_pred_g"]],
-                "edad_actual": int(edad_actual),
-                "peso_d40": float(peso_d40),
+                "error":       None,
+                "df":          df_out,
+                "edad_actual": edad_actual,
+                "peso_d35":    peso_final,
+                "peso_d35_lo": peso_lo,
+                "peso_d35_hi": peso_hi,
             }
-        
+
         except Exception as e:
             import traceback
-            error_msg = f"Excepción en proyección: {str(e)}\n{traceback.format_exc()}"
-            print(f"❌ {error_msg}")
-            return {
-                "error": error_msg,
-                "df": None,
-                "edad_actual": None,
-                "peso_d40": None,
-            }
+            return {**_ERR, "error": f"Error en proyección: {e}\n{traceback.format_exc()}"}
 
 
-def cargar_predictor(ruta: str = "modelo_rf_avicola.joblib") -> Predictor:
-    """
-    Factory function para crear instancia del predictor
-    
-    Args:
-        ruta (str): Ruta al archivo joblib del modelo
-    
-    Returns:
-        Predictor: Instancia de Predictor (puede no tener modelo si falla)
-    
-    Ejemplo:
-        >>> predictor = cargar_predictor("modelo_rf_avicola.joblib")
-        >>> res = predictor.proyectar_curva(hist_df, target_edad=40)
-        >>> if not res.get("error"):
-        ...     print(f"Peso D40: {res['peso_d40']} kg")
-    """
+# ──────────────────────────────────────────────────────────────
+# FACTORY
+# ──────────────────────────────────────────────────────────────
+
+def cargar_predictor(ruta: str) -> Predictor:
     return Predictor(ruta)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# TEST (ejecutar si se corre este archivo directamente)
-# ─────────────────────────────────────────────────────────────────────────────
-
-if __name__ == "__main__":
-    print("Testing model_predictor.py...")
-    print("=" * 80)
-    
-    # Intentar cargar el predictor
-    predictor = cargar_predictor("modelo_rf_avicola.joblib")
-    
-    if predictor.model is None:
-        print("⚠️ El modelo no está disponible.")
-        print("   Asegúrate de que 'modelo_rf_avicola.joblib' existe en la carpeta.")
-    else:
-        print(f"✅ Predictor cargado correctamente")
-        print(f"   Features esperados: {len(predictor.features)}")
-        print(f"   Max edad: {predictor.max_edad}")

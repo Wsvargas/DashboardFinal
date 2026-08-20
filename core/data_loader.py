@@ -107,10 +107,12 @@ def _filtrar_ideal_sub(
     reproductora: str | None = None,
 ) -> pd.DataFrame:
     """
-    Filtro en cascada:
-    1) Zona + Tipo + Quintil + Reproductora
-    2) Zona + Tipo + Quintil  (sin Reproductora)
-    3) Zona + Tipo            (sin Quintil ni Reproductora)
+    Filtro en cascada. Siempre retorna UN solo escenario (un único conjunto
+    de filas Edad→Peso→FCR_ideal), nunca mezcla escenarios distintos:
+
+    1) Zona + Tipo + Quintil + Reproductora exacta
+    2) Zona + Tipo + Quintil + Reproductora más cercana (Adulta > Joven > Vieja)
+    3) Zona + Tipo + Quintil más cercano + Reproductora más cercana
     """
     if ideales_df is None or ideales_df.empty:
         return pd.DataFrame()
@@ -121,21 +123,56 @@ def _filtrar_ideal_sub(
         (ideales_df["Quintil"] == quint)
     ].copy()
 
-    if not base.empty and "ReproductoraStd" in base.columns:
-        repro = _norm_reproductora_value(reproductora)
-        if repro != "SIN_DATO":
-            exact = base[base["ReproductoraStd"] == repro].copy()
-            if not exact.empty:
-                return exact
-
     if not base.empty:
+        if "ReproductoraStd" in base.columns:
+            repro = _norm_reproductora_value(reproductora)
+
+            # Nivel 1: Reproductora exacta
+            if repro != "SIN_DATO":
+                exact = base[base["ReproductoraStd"] == repro].copy()
+                if not exact.empty:
+                    return exact
+
+            # Nivel 2: Reproductora más cercana (Adulta como punto medio)
+            for preferred in ["ADULTA", "JOVEN", "VIEJA"]:
+                subset = base[base["ReproductoraStd"] == preferred].copy()
+                if not subset.empty:
+                    return subset
+
         return base
 
-    # Cascada nivel 3: solo Zona + Tipo
+    # Nivel 3: Zona + Tipo → buscar Quintil más cercano + Reproductora más cercana
     fallback = ideales_df[
         (ideales_df["Zona_Nombre"] == zona) &
         (ideales_df["TipoGranja"] == tipo)
     ].copy()
+
+    if fallback.empty:
+        return fallback
+
+    if "Quintil" in fallback.columns:
+        try:
+            quint_num = int(quint[1]) if quint and len(quint) > 1 and quint[1:].isdigit() else 3
+        except (ValueError, IndexError):
+            quint_num = 3
+
+        avail = fallback["Quintil"].dropna().unique().tolist()
+        if avail:
+            closest_q = min(avail, key=lambda q: abs(int(q[1]) - quint_num) if len(q) > 1 and q[1:].isdigit() else 99)
+            fallback = fallback[fallback["Quintil"] == closest_q].copy()
+
+    if "ReproductoraStd" in fallback.columns:
+        repro = _norm_reproductora_value(reproductora)
+        if repro != "SIN_DATO":
+            repro_sub = fallback[fallback["ReproductoraStd"] == repro].copy()
+            if not repro_sub.empty:
+                return repro_sub
+
+        for preferred in ["ADULTA", "JOVEN", "VIEJA"]:
+            subset = fallback[fallback["ReproductoraStd"] == preferred].copy()
+            if not subset.empty:
+                return subset
+
     return fallback
 
 
@@ -609,8 +646,6 @@ def construir_historial_ideal_comparable(
     ideal = (
         ideal[["Edad", "Peso", "FCR_ideal"]]
         .dropna(subset=["Edad"])
-        .groupby("Edad", as_index=False)
-        .mean()
         .sort_values("Edad")
         .reset_index(drop=True)
     )
@@ -701,7 +736,18 @@ def enriquecer_historial_con_ideal(
                 reproductora=repro,
             )
 
+        # ── Determinar qué escenario se usó realmente ─────────────────
+        escenario_usado = None
+        es_exacto = False
+        if not ideal_sub.empty and "Etiqueta_Escenario" in ideal_sub.columns:
+            unicos = ideal_sub["Etiqueta_Escenario"].dropna().unique()
+            if len(unicos) >= 1:
+                escenario_usado = str(unicos[0])
+                es_exacto = (etiqueta is not None and escenario_usado == etiqueta)
+
         hist_comp = construir_historial_ideal_comparable(hist_lote, ideal_sub)
+        hist_comp["EscenarioIdealUsado"] = escenario_usado
+        hist_comp["EsMatchExacto"] = es_exacto
         resultados.append(hist_comp)
 
     if not resultados:

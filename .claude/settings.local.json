@@ -4,7 +4,16 @@
       "Bash(python -c ' *)",
       "Bash(python etl/enrich_simulado.py)",
       "Bash(python -X utf8 etl/etl.py)",
-      "Bash(python -X utf8 data/suavizar_ideales.py)"
+      "Bash(python -X utf8 data/suavizar_ideales.py)",
+      "Bash(find /c/Users/willi/AppData -name \"python.exe\" 2>/dev/null | grep -v \"WindowsApps\" | head -10; find /c/ProgramData -name \"python.exe\" 2>/dev/null | head -5; find /c/Python* -name \"python.exe\" 2>/dev/null | head -5)",
+      "Read(//c/ProgramData/**)",
+      "Read(//c/Program Files \\(x86\\)/**)",
+      "Bash(find /c/Users/willi/anaconda* /c/Users/willi/miniconda* /c/Users/willi/AppData/Roaming/Python*)",
+      "Bash(\"/c/Users/willi/AppData/Local/Microsoft/WindowsApps/python.exe\" --version)",
+      "Bash(/c/Users/willi/AppData/Local/Microsoft/WindowsApps/python.exe etl.py)",
+      "Bash(/c/Users/willi/AppData/Local/Microsoft/WindowsApps/python.exe models/retrain_model.py)",
+      "Bash(cmd.exe /c \"echo %DATE%\")",
+      "Bash(/c/Users/willi/AppData/Local/Microsoft/WindowsApps/python.exe -c ' *)"
     ]
   }
 }

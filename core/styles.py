@@ -361,5 +361,23 @@ div[data-testid="stDataFrame"] * {{
     color: {MUTED} !important;
     font-weight: 700 !important;
 }}
+
+/* ──────────────────────────────────────────────────────────
+   ALERTAS (st.error/warning/info/success)
+   Forzar texto oscuro legible: con tema oscuro de Streamlit
+   el texto sale blanco e invisible sobre el fondo claro
+────────────────────────────────────────────────────────── */
+div[data-testid="stAlert"] {{
+    background: #F8FAFC !important;
+    border: 1px solid {BORDER} !important;
+    border-radius: 10px !important;
+}}
+
+div[data-testid="stAlert"] p,
+div[data-testid="stAlert"] span,
+div[data-testid="stAlert"] div,
+div[data-testid="stAlert"] li {{
+    color: {TEXT} !important;
+}}
 </style>
 """)

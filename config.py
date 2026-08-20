@@ -6,8 +6,8 @@
 # ── Archivos de datos ─────────────────────────────────────────
 MAIN_FILE         = "etl/data/produccion_mes_actual.xlsx"
 BENCH_FILE        = "data/LOTES_IDEALES_DASHBOARD_COMPATIBLE.xlsx"
-MODEL_FILE        = "models/modelo_rf_avicola.joblib"
-EDAD_MIN_ANALISIS = 7
+MODEL_FILE        = "models/modelo_curva_futura_catboost.joblib"
+EDAD_MIN_ANALISIS = 15
 
 # ── Brand tokens ─────────────────────────────────────────────
 RED    = "#DA291C"

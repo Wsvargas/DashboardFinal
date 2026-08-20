@@ -1,13 +1,15 @@
 import os
+import pandas as pd
 import streamlit as st
 from datetime import datetime
 
 
 # ── Módulos propios  ───────────────────────────────────────────
 from config import (
-    MAIN_FILE, BENCH_FILE, RED, BLACK, BG, CARD, BORDER, TEXT, MUTED, GREEN, AMBER, BLUE,
+    MAIN_FILE, BENCH_FILE, MODEL_FILE, RED, BLACK, BG, CARD, BORDER, TEXT, MUTED, GREEN, AMBER, BLUE,
+    ETAPA_ORDER,
 )
-from core.helpers import md
+from core.helpers import md, _file_mtime
 from core.styles import inject_css
 from core.data_loader import (
     load_and_prepare,
@@ -17,7 +19,9 @@ from core.data_loader import (
 )
 
 # ── Módulos del dashboard ─────────────────────────────────────
-from dashboard.kpis  import render_kpis_globales
+from dashboard.kpis  import render_kpis_globales, render_kpi_sobrecosto
+from dashboard.sec00_riesgo import render_lotes_riesgo
+from dashboard.diccionario import mostrar_diccionario
 from dashboard.sec01 import render_sec01
 from dashboard.sec02 import render_sec02
 from dashboard.sec03 import render_sec03
@@ -123,7 +127,19 @@ if "pred_cache" not in st.session_state:
 # ──────────────────────────────────────────────────────────────
 hoy = datetime.today()
 
-hc1, hc2 = st.columns([5, 1.5])
+# Fecha de corte REAL de los datos (última transacción del ETL,
+# excluyendo filas extendidas que llevan fechas proyectadas a futuro)
+try:
+    _df_fechas = DF_ALL
+    if "EsExtendido" in DF_ALL.columns:
+        _no_ext = pd.to_numeric(DF_ALL["EsExtendido"], errors="coerce").fillna(0) != 1
+        _df_fechas = DF_ALL[_no_ext]
+    _fecha_corte = pd.to_datetime(_df_fechas["FechaTransaccion"], errors="coerce").max()
+    corte_txt = f"{_fecha_corte:%d %b %Y}" if pd.notna(_fecha_corte) else f"{hoy:%d %b %Y}"
+except Exception:
+    corte_txt = f"{hoy:%d %b %Y}"
+
+hc1, hc2, hc3 = st.columns([4.3, 1.5, 1.0])
 
 with hc1:
     md(f"""
@@ -133,7 +149,7 @@ with hc1:
         <div class="pronaca-header-title">PRONACA · PRODUCCIÓN AVÍCOLA v15</div>
         <div class="pronaca-header-sub">Dashboard Interactivo · Con acceso a predictor operativo</div>
       </div>
-      <div class="pronaca-header-pill">📅 Corte {hoy:%d %b %Y}</div>
+      <div class="pronaca-header-pill">📅 Datos al corte: {corte_txt}</div>
     </div>
     """)
 
@@ -142,6 +158,12 @@ with hc2:
     st.write("")
     if st.button("🔮 Ir a predictor operativo", use_container_width=True):
         go_predictiva()
+
+with hc3:
+    st.write("")
+    st.write("")
+    if st.button("📖 Diccionario", use_container_width=True):
+        mostrar_diccionario()
 
 # ──────────────────────────────────────────────────────────────
 # FILTROS SUPERIORES
@@ -193,9 +215,72 @@ LOTES_FILTRADOS = SF["LoteCompleto"].dropna().unique().tolist()
 DF_FILTRADO = DF_HIST_COMP[DF_HIST_COMP["LoteCompleto"].isin(LOTES_FILTRADOS)].copy()
 
 # ──────────────────────────────────────────────────────────────
-# KPIs GLOBALES
+# KPIs GLOBALES — dinámicos según selección activa
+# Lee el estado de los widgets ANTES de renderizarlos (Streamlit
+# actualiza session_state con la selección del frontend antes de
+# ejecutar el script, por eso esto funciona sin lag).
 # ──────────────────────────────────────────────────────────────
-render_kpis_globales(SF)
+def _puntos_widget(key):
+    """Extrae la lista de puntos seleccionados de un chart por su key."""
+    ws = st.session_state.get(key)
+    if ws is None:
+        return []
+    try:
+        sel = ws.selection if hasattr(ws, "selection") else ws.get("selection", {})
+        return (sel or {}).get("points", [])
+    except Exception:
+        return []
+
+# 1. Etapa: chart_etapas (SEC01) — mapeamos point_index a nombre de etapa
+_etapas_disponibles = [e for e in ETAPA_ORDER if e in SF["Etapa"].values]
+_etapas_kpi = []
+for _p in _puntos_widget("chart_etapas"):
+    _idx = _p.get("point_index")
+    if _idx is not None and 0 <= _idx < len(_etapas_disponibles):
+        _etapas_kpi.append(_etapas_disponibles[_idx])
+
+# 2. Granja: chart_granjas (SEC02) — customdata[0] = GranjaID
+_granja_kpi = None
+_pts_g = _puntos_widget("chart_granjas")
+if _pts_g:
+    try:
+        _granja_kpi = _pts_g[0]["customdata"][0]
+    except Exception:
+        pass
+
+# 3. Lote: ya guardado en session_state por SEC02/SEC03
+_lote_kpi = st.session_state.get("lote_sel_sec03")
+
+# Jerarquía: lote > granja > etapa > todos
+SF_KPI = SF.copy()
+_ctx = None
+if _lote_kpi and _lote_kpi in SF["LoteCompleto"].values:
+    SF_KPI = SF[SF["LoteCompleto"] == _lote_kpi]
+    _ctx = f"🔖 {_lote_kpi}"
+elif _granja_kpi and _granja_kpi in SF["GranjaID"].values:
+    SF_KPI = SF[SF["GranjaID"] == _granja_kpi]
+    _ctx = f"🏭 Granja {_granja_kpi}"
+elif _etapas_kpi:
+    SF_KPI = SF[SF["Etapa"].isin(_etapas_kpi)]
+    _ctx = "📊 " + " + ".join(
+        e.split("(")[1].rstrip(")") if "(" in e else e for e in _etapas_kpi
+    )
+
+render_kpis_globales(SF_KPI, context_label=_ctx)
+
+# ── Sobrecosto acumulado / ahorro potencial ───────────────────
+render_kpi_sobrecosto(SF_KPI)
+
+# ──────────────────────────────────────────────────────────────
+# LOTES EN RIESGO — alerta predictiva (todos los lotes abiertos)
+# ──────────────────────────────────────────────────────────────
+render_lotes_riesgo(
+    SF=SF,
+    DF_ALL=DF_ALL,
+    IDEALES=IDEALES,
+    data_key=_file_mtime(MAIN_FILE),
+    model_mtime=_file_mtime(MODEL_FILE),
+)
 
 # ──────────────────────────────────────────────────────────────
 # LAYOUT PRINCIPAL
@@ -216,6 +301,12 @@ with left:
 
     if lote_sel:
         st.session_state["lote_sel_sec03"] = lote_sel
+
+    # Si el lote guardado ya no está en el SF activo (cambio de filtros),
+    # lo limpiamos para evitar errores en sec03/sec04.
+    lote_guardado = st.session_state.get("lote_sel_sec03")
+    if lote_guardado and lote_guardado not in SF["LoteCompleto"].values:
+        st.session_state["lote_sel_sec03"] = None
 
     render_sec03(
         lote_sel=st.session_state.get("lote_sel_sec03"),

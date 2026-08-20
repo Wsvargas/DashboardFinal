@@ -6,7 +6,7 @@ import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
 
-from config           import BENCH_FILE
+from config           import BENCH_FILE, MODEL_FILE
 from core.data_loader import load_ideales, get_curva_ideal_promedio
 
 
@@ -31,11 +31,15 @@ TARGET_DEFAULT = 35
 # PAGE CONFIG
 # =========================================================
 def apply_page_config():
-    st.set_page_config(
-        page_title="PRONACA | Proyección Operativa de Peso",
-        layout="wide",
-        initial_sidebar_state="expanded",
-    )
+    try:
+        st.set_page_config(
+            page_title="PRONACA | Proyección Operativa de Peso",
+            layout="wide",
+            initial_sidebar_state="expanded",
+        )
+    except Exception:
+        # Ya fue configurada por app.py al entrar desde el dashboard
+        pass
 
 
 # =========================================================
@@ -225,6 +229,21 @@ def inject_local_css():
             color: {TEXT};
             font-weight: 700;
         }}
+
+        /* Alertas nativas (st.error/warning/info/success): forzar texto
+           oscuro legible — con tema oscuro Streamlit las pinta blancas
+           y quedan invisibles sobre el fondo claro del panel */
+        div[data-testid="stAlert"] {{
+            background: #F8FAFC !important;
+            border: 1px solid {BORDER} !important;
+            border-radius: 12px !important;
+        }}
+        div[data-testid="stAlert"] p,
+        div[data-testid="stAlert"] span,
+        div[data-testid="stAlert"] div,
+        div[data-testid="stAlert"] li {{
+            color: {TEXT} !important;
+        }}
         </style>
         """,
         unsafe_allow_html=True,
@@ -235,7 +254,7 @@ def inject_local_css():
 # MODELO
 # =========================================================
 def load_predictor(model_path: str):
-    from model_predictor import cargar_predictor
+    from core.model_predictor import cargar_predictor
     return cargar_predictor(model_path)
 
 
@@ -268,7 +287,12 @@ def render_data_dictionary():
                 <b style="color:{TEXT}">Edad actual:</b> edad del lote al momento de la consulta.<br>
                 <b style="color:{TEXT}">Peso actual:</b> peso promedio actual del lote en kilogramos.<br>
                 <b style="color:{TEXT}">Aves vivas:</b> cantidad estimada de aves vivas del lote.<br>
-                <b style="color:{TEXT}">Día objetivo:</b> día hasta el cual se desea proyectar.
+                <b style="color:{TEXT}">Alimento acumulado:</b> consumo real del lote en kg (opcional; 0 = estimado con conversión ideal).<br>
+                <b style="color:{TEXT}">Día objetivo:</b> día hasta el cual se desea proyectar.<br><br>
+                Los valores ingresados se validan contra rangos biológicos reales:
+                peso esperado según la edad y el escenario, tamaño típico de galpón,
+                y conversión alimenticia coherente. Datos imposibles bloquean el cálculo;
+                datos atípicos generan una advertencia con el rango esperado.
             </div>
             """,
             unsafe_allow_html=True,
@@ -287,11 +311,143 @@ def render_kpi_card(value: str, label: str):
     )
 
 
+def render_alertas_compactas(errores: list, avisos: list):
+    """
+    Alertas agrupadas en cajas delgadas con colores propios (independiente
+    del tema claro/oscuro de Streamlit, que puede dejar el texto de
+    st.warning/st.error invisible sobre el fondo blanco del panel).
+    Una sola caja por tipo, cada mensaje en una línea compacta.
+    """
+    import re
+
+    def _caja(msgs, bg, borde, texto, icono):
+        lineas = "".join(
+            f'<div style="margin:1px 0;">{icono} '
+            + re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", str(m))
+            + "</div>"
+            for m in msgs
+        )
+        st.markdown(
+            f"""
+            <div style="background:{bg};border:1px solid {borde}55;
+                        border-left:3px solid {borde};border-radius:8px;
+                        padding:5px 10px;margin:3px 0;
+                        color:{texto};font-size:0.78rem;line-height:1.4;">
+                {lineas}
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    if errores:
+        _caja(errores, "#FEF2F2", "#DC2626", "#991B1B", "⛔")
+    if avisos:
+        _caja(avisos, "#FFFBEB", "#D97706", "#92400E", "⚠️")
+
+
 def detectar_columna_peso(df: pd.DataFrame) -> Optional[str]:
     for c in ["Peso", "Peso_ideal", "PesoIdeal"]:
         if c in df.columns:
             return c
     return None
+
+
+# =========================================================
+# VALIDACIÓN DE COHERENCIA BIOLÓGICA
+# =========================================================
+# Rangos operativos reales de un galpón de engorde
+AVES_MIN_GALPON = 500
+AVES_MAX_GALPON = 60_000
+FCR_MIN_REAL    = 0.90   # conversión alimenticia mínima plausible
+FCR_MAX_REAL    = 2.30   # conversión alimenticia máxima plausible
+DESVIO_PESO_AVISO  = 0.30   # ±30% vs curva ideal → aviso
+DESVIO_PESO_BLOQUEO = 1.00  # ±100% (mitad / doble) → dato no real, bloquea
+
+
+def peso_referencia_ideal(ideal_curve: pd.DataFrame, edad: int) -> Optional[float]:
+    """Peso esperado en la curva ideal para una edad dada (interpolado)."""
+    if ideal_curve is None or ideal_curve.empty:
+        return None
+    peso_col = detectar_columna_peso(ideal_curve)
+    if peso_col is None:
+        return None
+    c = ideal_curve.copy()
+    c["Edad"] = pd.to_numeric(c["Edad"], errors="coerce")
+    c[peso_col] = pd.to_numeric(c[peso_col], errors="coerce")
+    c = c.dropna(subset=["Edad", peso_col]).sort_values("Edad")
+    if c.empty:
+        return None
+    ref = float(np.interp(edad, c["Edad"].values, c[peso_col].values))
+    return ref if np.isfinite(ref) and ref > 0 else None
+
+
+def validar_entradas(
+    edad_actual: int,
+    peso_actual: float,
+    aves_vivas: float,
+    alim_acum: float,
+    ideal_curve: pd.DataFrame,
+):
+    """
+    Valida coherencia biológica de los datos ingresados.
+    Retorna (errores, avisos):
+      - errores: datos físicamente imposibles → se bloquea la proyección
+      - avisos : datos fuera del rango típico → se advierte con el rango esperado
+    """
+    errores, avisos = [], []
+
+    # ── Peso vs edad (contra curva ideal) ─────────────────────
+    peso_ref = peso_referencia_ideal(ideal_curve, edad_actual)
+    if peso_ref is not None:
+        lo_aviso = peso_ref * (1 - DESVIO_PESO_AVISO)
+        hi_aviso = peso_ref * (1 + DESVIO_PESO_AVISO)
+        lo_bloq  = peso_ref * (1 - DESVIO_PESO_BLOQUEO / 2)   # mitad del ideal
+        hi_bloq  = peso_ref * (1 + DESVIO_PESO_BLOQUEO)       # doble del ideal
+
+        if peso_actual < lo_bloq or peso_actual > hi_bloq:
+            errores.append(
+                f"**Peso no real:** {peso_actual:.2f} kg es imposible para un ave de "
+                f"{edad_actual} días (referencia del escenario: {peso_ref:.2f} kg). "
+                f"Rango admisible: **{lo_bloq:.2f} – {hi_bloq:.2f} kg**."
+            )
+        elif peso_actual < lo_aviso or peso_actual > hi_aviso:
+            avisos.append(
+                f"**Peso atípico:** {peso_actual:.2f} kg está fuera del rango esperado "
+                f"para el día {edad_actual} en este escenario: "
+                f"**{lo_aviso:.2f} – {hi_aviso:.2f} kg** (ideal ≈ {peso_ref:.2f} kg). "
+                f"La proyección se calculará, pero interprétela con cautela."
+            )
+
+    # ── Aves vivas (tamaño típico de galpón) ──────────────────
+    if aves_vivas < AVES_MIN_GALPON or aves_vivas > AVES_MAX_GALPON:
+        avisos.append(
+            f"**Aves atípico:** {aves_vivas:,.0f} aves está fuera del rango típico "
+            f"de un galpón de engorde: **{AVES_MIN_GALPON:,} – {AVES_MAX_GALPON:,}**."
+        )
+
+    # ── Alimento acumulado vs biomasa (conversión implícita) ──
+    if alim_acum is not None and alim_acum > 0:
+        kg_live = aves_vivas * peso_actual
+        if kg_live > 0:
+            fcr_implicito = alim_acum / kg_live
+            alim_lo = kg_live * FCR_MIN_REAL
+            alim_hi = kg_live * FCR_MAX_REAL
+
+            if fcr_implicito < 0.50 or fcr_implicito > 4.00:
+                errores.append(
+                    f"**Alimento no real:** {alim_acum:,.0f} kg implica una conversión "
+                    f"de {fcr_implicito:.2f} (alimento/biomasa), biológicamente imposible. "
+                    f"Para {aves_vivas:,.0f} aves de {peso_actual:.2f} kg el rango coherente es "
+                    f"**{alim_lo:,.0f} – {alim_hi:,.0f} kg**."
+                )
+            elif fcr_implicito < FCR_MIN_REAL or fcr_implicito > FCR_MAX_REAL:
+                avisos.append(
+                    f"**Alimento atípico:** {alim_acum:,.0f} kg implica conversión "
+                    f"{fcr_implicito:.2f}, fuera del rango real {FCR_MIN_REAL:.2f}–{FCR_MAX_REAL:.2f}. "
+                    f"Rango coherente para este lote: **{alim_lo:,.0f} – {alim_hi:,.0f} kg**."
+                )
+
+    return errores, avisos
 
 
 # =========================================================
@@ -306,6 +462,7 @@ def seed_history_from_ideal(
     tipo: str,
     quintil: str,
     reproductora: str,
+    alim_acum_usuario: float = 0.0,
 ) -> pd.DataFrame:
     curve = ideal_curve.copy()
     peso_col = detectar_columna_peso(curve)
@@ -367,7 +524,26 @@ def seed_history_from_ideal(
             }
         )
 
-    return pd.DataFrame(rows).sort_values("Edad").reset_index(drop=True)
+    seed = pd.DataFrame(rows).sort_values("Edad").reset_index(drop=True)
+
+    # Si el usuario ingresó alimento acumulado real, escalar la serie
+    # estimada para que el último día coincida con ese valor.
+    if alim_acum_usuario and alim_acum_usuario > 0:
+        alim_final_est = seed["AlimAcumKg"].iloc[-1]
+        if pd.notna(alim_final_est) and alim_final_est > 0:
+            factor_alim = float(alim_acum_usuario) / float(alim_final_est)
+            seed["AlimAcumKg"] = seed["AlimAcumKg"] * factor_alim
+            seed["alimento acumulado"] = seed["AlimAcumKg"]
+            seed["FCR_Cum"] = seed["AlimAcumKg"] / seed["KgLive"].replace(0, np.nan)
+        else:
+            # No había serie estimada: asignar solo el valor final
+            seed.loc[seed.index[-1], "AlimAcumKg"] = float(alim_acum_usuario)
+            seed.loc[seed.index[-1], "alimento acumulado"] = float(alim_acum_usuario)
+            kg_live_f = seed["KgLive"].iloc[-1]
+            if pd.notna(kg_live_f) and kg_live_f > 0:
+                seed.loc[seed.index[-1], "FCR_Cum"] = float(alim_acum_usuario) / kg_live_f
+
+    return seed
 
 
 def prepare_seed_for_model(seed_hist: pd.DataFrame) -> pd.DataFrame:
@@ -601,10 +777,16 @@ def main(go_dashboard=None):
         st.error(f"No se encontró el benchmark: {BENCH_FILE}")
         st.stop()
 
-    model_path = "modelo_rf_avicola.joblib"
+    model_path = MODEL_FILE
     predictor = None
     if os.path.exists(model_path):
         predictor = load_predictor(model_path)
+    else:
+        st.error(
+            f"No se encontró el modelo en {model_path}. "
+            "Ejecuta models/retrain_model.py para generarlo."
+        )
+        st.stop()
 
     ideales = load_ideales(BENCH_FILE)
     if ideales is None or ideales.empty:
@@ -666,27 +848,45 @@ def main(go_dashboard=None):
             st.number_input("Día objetivo", min_value=edad_actual, max_value=45, value=max(TARGET_DEFAULT, edad_actual), step=1)
         )
 
-    st.markdown(
-        f"""
-        <div class="info-strip">
-            El cálculo toma el peso actual como punto de partida y genera la proyección hacia adelante utilizando el modelo entrenado.
-        </div>
-        """,
-        unsafe_allow_html=True,
+    c9, c10 = st.columns([1, 3])
+    with c9:
+        alim_acum = float(
+            st.number_input(
+                "Alimento acumulado (kg) — opcional",
+                min_value=0.0, max_value=500000.0, value=0.0, step=500.0, format="%.0f",
+                help="0 = estimar automáticamente con la conversión ideal del escenario. "
+                     "Si ingresas el consumo real del lote, se valida su coherencia.",
+            )
+        )
+
+    # ── Validación de coherencia en vivo ──────────────────────
+    ideal_curve = get_curva_ideal_promedio(
+        zona,
+        tipo,
+        quintil,
+        ideales,
+        edad_max=target_day,
+        reproductora=reproductora,
     )
+
+    errores_val, avisos_val = validar_entradas(
+        edad_actual=edad_actual,
+        peso_actual=peso_actual,
+        aves_vivas=aves_vivas,
+        alim_acum=alim_acum,
+        ideal_curve=ideal_curve,
+    )
+
+    render_alertas_compactas(errores_val, avisos_val)
 
     st.write("")
 
-    if st.button("Calcular proyección operativa", type="primary", use_container_width=True):
-        ideal_curve = get_curva_ideal_promedio(
-            zona,
-            tipo,
-            quintil,
-            ideales,
-            edad_max=target_day,
-            reproductora=reproductora,
-        )
-
+    if st.button(
+        "Calcular proyección operativa",
+        type="primary",
+        use_container_width=True,
+        disabled=bool(errores_val),
+    ):
         if ideal_curve is None or ideal_curve.empty:
             st.error("No existe base de referencia para la combinación seleccionada.")
             st.stop()
@@ -701,6 +901,7 @@ def main(go_dashboard=None):
                 tipo=tipo,
                 quintil=quintil,
                 reproductora=reproductora,
+                alim_acum_usuario=alim_acum,
             )
         except Exception as e:
             st.error(f"No se pudo construir la base de cálculo: {e}")
@@ -715,7 +916,6 @@ def main(go_dashboard=None):
         res = predictor.proyectar_curva(
             hist_lote=hist_model,
             target_edad=target_day,
-            enforce_monotonic="isotonic",
         )
 
         if res.get("error"):
@@ -739,9 +939,18 @@ def main(go_dashboard=None):
         dias_rest = max(0, target_day - edad_actual)
         crecimiento = peso_objetivo - peso_actual
 
+        peso_lo = res.get("peso_d35_lo")
+        peso_hi = res.get("peso_d35_hi")
+        tiene_banda = peso_lo is not None and peso_hi is not None
+
         st.markdown('<div class="section-title">Resultados de la proyección</div>', unsafe_allow_html=True)
 
-        r1, r2, r3, r4 = st.columns(4)
+        if tiene_banda:
+            r1, r2, r3, r4, r5 = st.columns(5)
+        else:
+            r1, r2, r3, r4 = st.columns(4)
+            r5 = None
+
         with r1:
             render_kpi_card(f"{peso_actual:.3f} kg", "Peso base")
         with r2:
@@ -750,6 +959,12 @@ def main(go_dashboard=None):
             render_kpi_card(f"{crecimiento:+.3f} kg", "Crecimiento esperado")
         with r4:
             render_kpi_card(f"{dias_rest} días", "Tiempo restante")
+        if r5 is not None:
+            with r5:
+                render_kpi_card(
+                    f"{peso_lo:.2f} – {peso_hi:.2f} kg",
+                    "Rango probable (80%)"
+                )
 
         st.write("")
         plot_projection(seed_hist, proj_curve, ycol_pred, target_day)

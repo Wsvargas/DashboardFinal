@@ -252,7 +252,7 @@ def transformar_brl():
     n_final = len(df)
     audit.append(f"BRL: {n_original} → {n_final} registros ({n_original - n_final} eliminados)")
 
-    print(f"   ✓ {n_final} registros válidos")
+    print(f"   [OK] {n_final} registros validos")
     return df
 
 
@@ -336,7 +336,7 @@ def transformar_kri_galpon():
         df["Aves_Iniciales"] = np.nan
 
     audit.append(f"KRI_GALPON: {len(df)} registros")
-    print(f"   ✓ {len(df)} registros")
+    print(f"   [OK] {len(df)} registros")
     return df
 
 
@@ -383,7 +383,7 @@ def cruzar_brl_galpon(brl, kri_gal):
         df["Aves_vivas"] = np.nan
 
     audit.append(f"Cruce BRL+GALPON: {len(df)} registros (cerrados + abiertos)")
-    print("   ✓ Cruzado, cerrados y abiertos conservados")
+    print("   [OK] Cruzado, cerrados y abiertos conservados")
     return df
 
 
@@ -459,7 +459,7 @@ def extender_lotes_cerrados_hasta_venta(df):
     df = df.sort_values(["LoteCompleto", "Edad", "FechaTransaccion"]).reset_index(drop=True)
 
     audit.append(f"Extensión a edad de venta: {filas_agregadas} filas agregadas")
-    print(f"   ✓ {filas_agregadas} filas extendidas")
+    print(f"   [OK] {filas_agregadas} filas extendidas")
     return df
 
 
@@ -597,7 +597,7 @@ def calcular_peso_final(df):
                 df.loc[idx_real, "PesoFinal"] = pesos_interp[i]
 
     audit.append(f"PesoFinal: calculado hasta Peso_Venta, {df['PesoFinal'].notna().sum()} con datos")
-    print("   ✓ PesoFinal calculado hasta Edad (venta) con Peso_Venta final")
+    print("   [OK] PesoFinal calculado hasta Edad (venta) con Peso_Venta final")
     return df
 
 
@@ -628,7 +628,7 @@ def recortar_hasta_ultimo_peso_final(df):
     df = df.sort_values(["LoteCompleto", "Edad", "FechaTransaccion"]).reset_index(drop=True)
 
     audit.append(f"Recorte por PesoFinal: {eliminados} registros eliminados")
-    print(f"   ✓ {eliminados} registros recortados")
+    print(f"   [OK] {eliminados} registros recortados")
     return df
 
 
@@ -670,10 +670,10 @@ def eliminar_lotes_con_baja_peso(df, tolerancia=1e-9):
         for lote in lotes_con_baja:
             audit.append(f"  - Eliminado por baja de peso: {lote}")
 
-        print(f"   ✓ {len(lotes_con_baja)} lotes eliminados por baja de peso")
+        print(f"   [OK] {len(lotes_con_baja)} lotes eliminados por baja de peso")
     else:
         audit.append("Lotes eliminados por baja de PesoFinal: 0")
-        print("   ✓ No se detectaron lotes con baja de peso")
+        print("   [OK] No se detectaron lotes con baja de peso")
 
     return df
 
@@ -719,7 +719,7 @@ def recalcular_series_base(df):
     df["Aves_vivas"] = df["Aves_vivas"].clip(lower=0)
 
     audit.append("Series base recalculadas correctamente")
-    print("   ✓ Series base recalculadas")
+    print("   [OK] Series base recalculadas")
     return df
 
 
@@ -767,7 +767,7 @@ def transformar_kri_alimento():
     n_despues = len(df)
 
     audit.append(f"KRI_ALIMENTO: {n_antes} → {n_despues} registros válidos")
-    print(f"   ✓ {n_despues} registros válidos")
+    print(f"   [OK] {n_despues} registros validos")
     return df
 
 
@@ -810,7 +810,7 @@ def calcular_precios_ponderados(kri_ali):
         f"Precios cronológicos: {len(precios_dia)} fechas reales y {len(promedio_lote)} promedios lote"
     )
 
-    print(f"   ✓ {len(precios_dia)} precios reales por fecha")
+    print(f"   [OK] {len(precios_dia)} precios reales por fecha")
     return precios_dia, promedio_lote
 
 
@@ -934,7 +934,7 @@ def cruzar_brl_precios(df, precios_dia, promedio_lote):
         f"Costos cronológicos: {exactos} exactos, {arrastrados} arrastrados, {sin_precio} sin precio"
     )
 
-    print("   ✓ Costos asignados cronológicamente")
+    print("   [OK] Costos asignados cronologicamente")
     return df
 
 
@@ -945,7 +945,7 @@ def transformar_brim():
     print("\n[8.1/9] Procesando archivo BRIM (reproductoras)...")
 
     if not os.path.exists(BRIM_FILE):
-        print(f"   ⚠ Archivo BRIM no encontrado: {BRIM_FILE}")
+        print(f"   [WARN] Archivo BRIM no encontrado: {BRIM_FILE}")
         print("   → Las columnas de reproductora quedarán vacías")
         return None
 
@@ -968,7 +968,7 @@ def transformar_brim():
     cols_req = ["Galpon/Corral", "Aves Alojadas", "Edad", "Días_guarda", "Raza"]
     faltantes = [c for c in cols_req if c not in df.columns]
     if faltantes:
-        print(f"   ❌ Columnas faltantes en BRIM: {faltantes}")
+        print(f"   [ERROR] Columnas faltantes en BRIM: {faltantes}")
         return None
 
     # Convertir a numérico
@@ -1045,9 +1045,9 @@ def transformar_brim():
             if raza_col not in tbl.columns:
                 tbl[raza_col] = np.nan
 
-    print(f"   ✓ BRIM procesado: {len(brim_agg)} galpones únicos (lote), "
+    print(f"   [OK] BRIM procesado: {len(brim_agg)} galpones unicos (lote), "
           f"{len(brim_agg_galpon)} (granja+galpon), {len(brim_agg_granja)} (granja)")
-    print(f"   ✓ Razas encontradas: {[c for c in brim_agg.columns if c.startswith('porcentaje_raza_')]}")
+    print(f"   [OK] Razas encontradas: {[c for c in brim_agg.columns if c.startswith('porcentaje_raza_')]}")
     return brim_agg, brim_agg_galpon, brim_agg_granja
 
 
@@ -1058,7 +1058,7 @@ def cruzar_brim(df, brim_resultado):
     ]
 
     if brim_resultado is None:
-        print("   ⚠ Sin datos BRIM — columnas de reproductora quedarán en NaN")
+        print("   [WARN] Sin datos BRIM -- columnas de reproductora quedaran en NaN")
         for col in _BRIM_COLS:
             df[col] = np.nan
         return df
@@ -1107,7 +1107,7 @@ def cruzar_brim(df, brim_resultado):
         df.loc[mask_sin_aves, "Aves_Iniciales"] = df.loc[mask_sin_aves, "aves_totales_brim"]
         n_rellenos = int(mask_sin_aves.sum())
         if n_rellenos > 0:
-            print(f"   ✓ Aves_Iniciales rellenadas desde BRIM: {n_rellenos} registros")
+            print(f"   [OK] Aves_Iniciales rellenadas desde BRIM: {n_rellenos} registros")
             # Recalcular Aves_vivas para los lotes que ahora tienen Aves_Iniciales
             lotes_nuevos = df.loc[mask_sin_aves, "LoteCompleto"].unique()
             for lote in lotes_nuevos:
@@ -1117,12 +1117,12 @@ def cruzar_brim(df, brim_resultado):
                     df.loc[mask_lote, "Aves_vivas"] = (
                         aves_ini - df.loc[mask_lote, "MortalidadDescarte_Acumulado"]
                     ).clip(lower=0)
-            print(f"   ✓ Aves_vivas recalculadas para {len(lotes_nuevos)} lotes abiertos")
+            print(f"   [OK] Aves_vivas recalculadas para {len(lotes_nuevos)} lotes abiertos")
 
-    print(f"   ✓ Join completado: {antes} filas → {len(df)} filas")
+    print(f"   [OK] Join completado: {antes} filas -> {len(df)} filas")
     lotes_con_brim = df.loc[df["ponderado_edad_reproductora"].notna(), "LoteCompleto"].nunique()
     lotes_sin_brim = df.loc[df["ponderado_edad_reproductora"].isna(), "LoteCompleto"].nunique()
-    print(f"   ✓ Lotes con BRIM: {lotes_con_brim} | Sin BRIM: {lotes_sin_brim}")
+    print(f"   [OK] Lotes con BRIM: {lotes_con_brim} | Sin BRIM: {lotes_sin_brim}")
     return df
 
 
@@ -1130,72 +1130,101 @@ def cruzar_brim(df, brim_resultado):
 # PASO 8.3: PROCESAR ARCHIVO AREAS (QUINTIL POR GRANJA)
 # ============================================================
 def transformar_areas():
-    print("\n[8.3/9] Procesando archivo AREAS (quintil por granja)...")
+    print("\n[8.3/9] Procesando archivo AREAS (quintil + area por galpon)...")
 
     if not os.path.exists(AREAS_FILE):
-        print(f"   ⚠ Archivo AREAS no encontrado: {AREAS_FILE}")
+        print(f"   Archivo AREAS no encontrado: {AREAS_FILE}")
         return None
 
     df = pd.read_excel(AREAS_FILE)
-    df.columns = [c.strip() for c in df.columns]
+    # Normalizar nombres de columna (pueden tener caracteres especiales: Galpón)
+    df.columns = [
+        unicodedata.normalize("NFKD", str(c))
+        .encode("ascii", "ignore").decode("ascii")
+        .strip()
+        for c in df.columns
+    ]
 
     cols_req = ["Granja", "Quintil_Granja", "Tipo granja", "Zona"]
     faltantes = [c for c in cols_req if c not in df.columns]
     if faltantes:
-        print(f"   ❌ Columnas faltantes en AREAS: {faltantes}")
+        print(f"   Columnas faltantes en AREAS: {faltantes}")
         return None
 
-    # Normalizar strings
     for col in ["Granja", "Quintil_Granja", "Tipo granja", "Zona"]:
         df[col] = df[col].astype(str).str.strip()
 
-    # Normalizar TipoGranja al formato del archivo de ideales: Propia / PCA
     df["TipoGranja_norm"] = df["Tipo granja"].str.upper().map({
         "GRANJA PROPIA": "Propia",
         "PROPIA":        "Propia",
         "PCA":           "PCA",
     }).fillna("PCA")
 
-    # Deduplicar a nivel granja (una fila por Granja)
+    # ── Nivel galpon: granja + numero de galpon → area m² ─────
+    col_galpon = next((c for c in df.columns if "galp" in c.lower()), None)
+    col_area   = next((c for c in df.columns if c.lower() == "area"), None)
+
+    areas_galpon = None
+    if col_galpon and col_area:
+        df[col_area]   = pd.to_numeric(df[col_area],   errors="coerce")
+        df[col_galpon] = pd.to_numeric(df[col_galpon], errors="coerce")
+        tmp = df[["Granja", col_galpon, col_area]].dropna().copy()
+        tmp["_galpon_num"] = tmp[col_galpon].astype(int).astype(str).str.zfill(2)
+        tmp["_join_key"]   = tmp["Granja"].str.upper() + "_" + tmp["_galpon_num"]
+        areas_galpon = tmp[["_join_key", col_area]].rename(columns={col_area: "Area_m2"})
+        print(f"   Areas por galpon disponibles: {len(areas_galpon)}")
+
+    # ── Nivel granja: una fila por Granja ─────────────────────
     areas_granja = (
         df.groupby("Granja")[["Quintil_Granja", "TipoGranja_norm", "Zona"]]
         .first()
         .reset_index()
     )
 
-    print(f"   ✓ AREAS procesado: {len(areas_granja)} granjas únicas")
-    print(f"   ✓ Quintiles: {sorted(areas_granja['Quintil_Granja'].unique())}")
-    return areas_granja
+    print(f"   AREAS procesado: {len(areas_granja)} granjas unicas")
+    print(f"   Quintiles: {sorted(areas_granja['Quintil_Granja'].unique())}")
+    return areas_granja, areas_galpon
 
 
-def cruzar_areas(df, areas_df):
-    if areas_df is None or areas_df.empty:
-        print("   ⚠ Sin datos AREAS — Quintil y Etiqueta_Escenario quedarán en NaN")
+def cruzar_areas(df, areas_resultado):
+    if areas_resultado is None:
+        print("   Sin datos AREAS — Quintil quedara en NaN")
         df["Quintil"] = np.nan
-        df["Etiqueta_Escenario"] = np.nan
+        df["Area_m2"] = np.nan
         return df
 
-    print("\n[8.4/9] Cruzando AREAS con producción...")
+    areas_granja, areas_galpon = areas_resultado
 
-    # Extraer código de granja desde LoteCompleto (BUC1001-2602-02-H → BUC1001)
+    print("\n[8.4/9] Cruzando AREAS con produccion...")
     df["_granja_key"] = df["LoteCompleto"].astype(str).str.split("-").str[0].str.upper()
 
     antes = len(df)
-    # Solo traer Quintil y TipoGranja_norm (Zona ya viene del BRL)
     cols_areas = ["Granja", "Quintil_Granja", "TipoGranja_norm"]
     df = df.merge(
-        areas_df[cols_areas].rename(columns={"Granja": "_granja_key"}),
+        areas_granja[cols_areas].rename(columns={"Granja": "_granja_key"}),
         on="_granja_key",
         how="left"
     )
-    df = df.drop(columns=["_granja_key"])
-
-    lotes_con = df.loc[df["Quintil_Granja"].notna(), "LoteCompleto"].nunique()
-    lotes_sin = df.loc[df["Quintil_Granja"].isna(), "LoteCompleto"].nunique()
-    print(f"   ✓ Join completado: {antes} filas → {len(df)} filas")
-    print(f"   ✓ Lotes con Quintil: {lotes_con} | Sin Quintil: {lotes_sin}")
-
     df = df.rename(columns={"Quintil_Granja": "Quintil"})
+
+    # ── Join de area por galpon (para aves/m2) ────────────────
+    if areas_galpon is not None and not areas_galpon.empty:
+        partes       = df["LoteCompleto"].astype(str).str.split("-")
+        galpon_str   = partes.str[2].str.zfill(2)
+        df["_gk"]    = df["_granja_key"] + "_" + galpon_str
+        df = df.merge(areas_galpon, left_on="_gk", right_on="_join_key", how="left")
+        df = df.drop(columns=["_gk", "_join_key"], errors="ignore")
+        con_area = df["Area_m2"].notna().sum()
+        print(f"   Filas con Area_m2: {con_area}/{len(df)}")
+    else:
+        df["Area_m2"] = np.nan
+
+    df = df.drop(columns=["_granja_key"], errors="ignore")
+
+    lotes_con = df.loc[df["Quintil"].notna(), "LoteCompleto"].nunique()
+    lotes_sin = df.loc[df["Quintil"].isna(),  "LoteCompleto"].nunique()
+    print(f"   Join: {antes} filas -> {len(df)} filas")
+    print(f"   Lotes con Quintil: {lotes_con} | Sin Quintil: {lotes_sin}")
     return df
 
 
@@ -1221,8 +1250,8 @@ def calcular_etiqueta_escenario(df):
     df["Etiqueta_Escenario"] = etiqueta
     conteo = df["Etiqueta_Escenario"].notna().sum()
     total  = len(df)
-    print(f"   ✓ Etiqueta_Escenario calculada: {conteo}/{total} filas con etiqueta")
-    print(f"   ✓ Etiquetas únicas: {sorted(df['Etiqueta_Escenario'].dropna().unique())[:8]} ...")
+    print(f"   [OK] Etiqueta_Escenario calculada: {conteo}/{total} filas con etiqueta")
+    print(f"   [OK] Etiquetas unicas: {sorted(df['Etiqueta_Escenario'].dropna().unique())[:8]} ...")
     return df
 
 
@@ -1320,6 +1349,24 @@ def preparar_salida(df):
         np.nan
     )
 
+    # ── aves/m2: densidad real por galpon ─────────────────────
+    if "Area_m2" in df.columns:
+        df["aves_m2"] = np.where(
+            df["Area_m2"].notna() & (df["Area_m2"] > 0),
+            df["Aves_vivas"] / df["Area_m2"],
+            np.nan
+        )
+    else:
+        df["aves_m2"] = np.nan
+
+    # ── Peso_diario: incremento de peso diario por lote ───────
+    df = df.sort_values(["LoteCompleto", "Edad"]).copy()
+    df["Peso_diario"] = (
+        df.groupby("LoteCompleto")["PesoFinal"]
+          .diff()
+          .clip(lower=0)   # no puede ser negativo
+    )
+
     cols_finales = [
         "Codigo_Unico", "LoteCosto", "PesoFinal", "Edad", "Edad^2", "Alimento_Acumulado", "conversio alimenticia",
         "BUCAY", "SANTODOMINGO", "TipoGranjero_Propia", "TipoGranjero_PCA",
@@ -1335,7 +1382,8 @@ def preparar_salida(df):
         "ponderado_edad_reproductora", "ponderado_dias_guarda",
         "porcentaje_raza_RAP95", "porcentaje_raza_C500SF",
         "Reproductora", "Guarda", "etapa",
-        "Quintil", "Etiqueta_Escenario"
+        "Quintil", "Etiqueta_Escenario",
+        "Area_m2", "aves_m2", "Peso_diario",
     ]
 
     for col in cols_finales:
@@ -1382,7 +1430,7 @@ def main():
         df = clasificar_reproductora_guarda_etapa(df)
 
         areas = transformar_areas()
-        df = cruzar_areas(df, areas)
+        df = cruzar_areas(df, areas)  # areas es (granja_df, galpon_df) o None
         print("\n[8.5/9] Calculando Etiqueta_Escenario...")
         df = calcular_etiqueta_escenario(df)
 
@@ -1395,7 +1443,40 @@ def main():
             audit_df = pd.DataFrame([{"Paso": s} for s in audit])
             audit_df.to_excel(writer, sheet_name="audit", index=False)
 
-        print(f"\n✅ ÉXITO")
+        # ============================================================
+        # ACUMULACIÓN HISTÓRICA
+        # Append solo lotes CERRADOS al archivo histórico de entrenamiento.
+        # Solo se agregan filas de lotes que aún no estén en el histórico
+        # (deduplicación por LoteCompleto + Edad para evitar duplicados).
+        # ============================================================
+        HIST_XLSX = os.path.join(OUTPUT_DIR, "historico_produccion.xlsx")
+        df_cerrados = df_final[df_final["Cerrado"] == 1].copy()
+
+        if not df_cerrados.empty:
+            print("\n[HISTORICO] Acumulando lotes cerrados en histórico...")
+            if os.path.exists(HIST_XLSX):
+                try:
+                    df_hist_prev = pd.read_excel(HIST_XLSX, sheet_name="historico")
+                    lotes_existentes = set(df_hist_prev["LoteCompleto"].dropna().unique())
+                    df_nuevos = df_cerrados[~df_cerrados["LoteCompleto"].isin(lotes_existentes)].copy()
+                    if not df_nuevos.empty:
+                        df_hist_nuevo = pd.concat([df_hist_prev, df_nuevos], ignore_index=True)
+                        with pd.ExcelWriter(HIST_XLSX, engine="openpyxl") as w:
+                            df_hist_nuevo.to_excel(w, sheet_name="historico", index=False)
+                        print(f"   [OK] {df_nuevos['LoteCompleto'].nunique()} lotes nuevos agregados "
+                              f"({len(df_nuevos)} registros) | Total historico: "
+                              f"{df_hist_nuevo['LoteCompleto'].nunique()} lotes")
+                    else:
+                        print("   [OK] Ningun lote nuevo -- historico sin cambios")
+                except Exception as e:
+                    print(f"   [WARN] No se pudo actualizar historico: {e}")
+            else:
+                with pd.ExcelWriter(HIST_XLSX, engine="openpyxl") as w:
+                    df_cerrados.to_excel(w, sheet_name="historico", index=False)
+                print(f"   [OK] Historico creado: {df_cerrados['LoteCompleto'].nunique()} lotes "
+                      f"({len(df_cerrados)} registros)")
+
+        print(f"\n[OK] EXITO")
         print(f"   Archivo: {OUT_XLSX}")
         print(f"   Registros: {len(df_final)}")
         print(f"   Lotes únicos: {df_final['Codigo_Unico'].nunique()}")
@@ -1407,7 +1488,7 @@ def main():
         print("\n" + "=" * 80)
 
     except Exception as e:
-        print(f"\n❌ ERROR: {e}")
+        print(f"\n[ERROR]: {e}")
         import traceback
         traceback.print_exc()
 
